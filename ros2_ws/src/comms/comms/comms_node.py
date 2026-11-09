@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool, Int32, UInt8
+from std_msgs.msg import Bool, Int32, UInt8, String
 import serial
 import enum
 import time
@@ -13,6 +13,12 @@ class SensorType(enum.Enum):
     ULTRASONIC = 2
     SLOT = 3
     TOF = 4
+    DC_ENCODER = 5
+
+class MotorType(enum.Enum):
+    SERVO = 0
+    STEPPER = 1
+    DC = 2
 
 SERIAL_PORT = "COM3"
 BAUD_RATE = 115200
@@ -24,6 +30,7 @@ REQUEST_MSGS = {
     SensorType.ULTRASONIC: b'REQ:ULTR\n',
     SensorType.SLOT: b'REQ:SLOT\n',
     SensorType.TOF: b'REQ:TOF\n',
+    SensorType.DC_ENCODER: b'REQ:DCE\n',
 }
 
 RESPONSE_HEADERS = {
@@ -32,6 +39,13 @@ RESPONSE_HEADERS = {
     'ULT': SensorType.ULTRASONIC,
     'SLT': SensorType.SLOT,
     'TOF': SensorType.TOF,
+    'DCE': SensorType.DC_ENCODER,
+}
+
+MOTOR_COMMAND_HEADERS = {
+    MotorType.SERVO: 'SER',
+    MotorType.STEPPER: 'STP',
+    MotorType.DC: 'DCM',
 }
 
 class CommsNode(Node):
@@ -53,9 +67,13 @@ class CommsNode(Node):
         self.ultrasonic_pub = self.create_publisher(Int32, 'ultrasonic', 10) # 0-4000
         self.slot_pub = self.create_publisher(Bool, 'slot', 10) # True if slot is blocked
         self.tof_pub = self.create_publisher(Int32, 'tof', 10) # 0~4000
+        self.dc_encoder_pub = self.create_publisher(Int32, 'dc_encoder', 10) # 0-4096, mapping tbd
 
         self.read_request_sub = self.create_subscription(
             UInt8, 'sensor_read_requests', self.sensorRequestCallback, 100)
+
+        self.motor_command_sub = self.create_subscription(
+            String, 'motor_commands', self.motorCommandCallback, 100)
 
 
         self.sensor_values = {
@@ -64,6 +82,7 @@ class CommsNode(Node):
             SensorType.ULTRASONIC: 0,
             SensorType.SLOT: False,
             SensorType.TOF: 0,
+            SensorType.DC_ENCODER: 0,
         }
         
         try:
@@ -73,6 +92,12 @@ class CommsNode(Node):
             raise
         self.get_logger().info(f'Connected to {self.serial.port}')
     
+    def motorCommandCallback(self, msg: String):
+        msgSplit = msg.data.split(':')
+        motorType = MotorType(int(msgSplit[0]))
+        command = MOTOR_COMMAND_HEADERS[motorType] + ':' + msgSplit[1] + '\n'
+        self.serial.write(command.encode('utf-8'))
+
     def sensorRequestCallback(self, msg: UInt8):
         self.request_data(SensorType(msg.data))
 
@@ -98,6 +123,8 @@ class CommsNode(Node):
                     self.updateSlotValue(msgSplit[1])
                 case SensorType.TOF:
                     self.updateTofValue(msgSplit[1])
+                case SensorType.DC_ENCODER:
+                    self.updateDcEncoderValue(msgSplit[1])
         else:
             self.get_logger().warning(f'Response not recognized: {msg}')        
 
@@ -125,6 +152,10 @@ class CommsNode(Node):
     def updateTofValue(self, value: str):
         self.sensor_values[SensorType.TOF] = int(value)
         self.tof_pub.publish(Int32(data=self.sensor_values[SensorType.TOF]))
+
+    def updateDcEncoderValue(self, value: str):
+        self.sensor_values[SensorType.DC_ENCODER] = int(value)
+        self.dc_encoder_pub.publish(Int32(data=self.sensor_values[SensorType.DC_ENCODER]))
     # endregion Sensor Value Update Functions
 
 def main(args=None):
