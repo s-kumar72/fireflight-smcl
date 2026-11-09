@@ -1,9 +1,11 @@
-"""Starter ROS 2 node for external device communications."""
+"""ROS 2 node communication between the Arduino and the UI"""
 
 import rclpy
 from rclpy.node import Node
+from std_msgs.msg import Bool, Int32, UInt8
 import serial
 import enum
+import time
 
 class SensorType(enum.Enum):
     POTENTIOMETER = 0
@@ -14,6 +16,7 @@ class SensorType(enum.Enum):
 
 SERIAL_PORT = "COM3"
 BAUD_RATE = 115200
+TIMEOUT = 1.0
 
 REQUEST_MSGS = {
     SensorType.POTENTIOMETER: b'REQ:POT\n',
@@ -21,6 +24,14 @@ REQUEST_MSGS = {
     SensorType.ULTRASONIC: b'REQ:ULTR\n',
     SensorType.SLOT: b'REQ:SLOT\n',
     SensorType.TOF: b'REQ:TOF\n',
+}
+
+RESPONSE_HEADERS = {
+    'POT': SensorType.POTENTIOMETER,
+    'TRM': SensorType.THERMISTOR,
+    'ULT': SensorType.ULTRASONIC,
+    'SLT': SensorType.SLOT,
+    'TOF': SensorType.TOF,
 }
 
 class CommsNode(Node):
@@ -37,32 +48,84 @@ class CommsNode(Node):
 
         self.get_logger().info('Comms node started')
 
-        self.pot_pub = self.create_publisher(int, 'potentiometer', 10) # 0-1023
-        self.thermistor_pub = self.create_publisher(int, 'thermistor', 10) # 0-1023
-        self.ultrasonic_pub = self.create_publisher(int, 'ultrasonic', 10) # 0-4000
-        self.slot_pub = self.create_publisher(bool, 'slot', 10) # True if slot is blocked
-        self.tof_pub = self.create_publisher(int, 'tof', 10) # 0~4000
+        self.pot_pub = self.create_publisher(Int32, 'potentiometer', 10) # 0-1023
+        self.thermistor_pub = self.create_publisher(Int32, 'thermistor', 10) # 0-1023
+        self.ultrasonic_pub = self.create_publisher(Int32, 'ultrasonic', 10) # 0-4000
+        self.slot_pub = self.create_publisher(Bool, 'slot', 10) # True if slot is blocked
+        self.tof_pub = self.create_publisher(Int32, 'tof', 10) # 0~4000
 
-        self.pot_value = 0
-        self.thermistor_value = 0
-        self.ultrasonic_value = 0
-        self.slot_value = False
-        self.tof_value = 0
+        self.read_request_sub = self.create_subscription(
+            UInt8, 'sensor_read_requests', self.sensorRequestCallback, 100)
+
+
+        self.sensor_values = {
+            SensorType.POTENTIOMETER: 0,
+            SensorType.THERMISTOR: 0,
+            SensorType.ULTRASONIC: 0,
+            SensorType.SLOT: False,
+            SensorType.TOF: 0,
+        }
         
         try:
-            self.serial = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+            self.serial = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=TIMEOUT)
         except serial.SerialException as exc:
             self.get_logger().error(f'Failed to open {SERIAL_PORT} at {BAUD_RATE} baud: {exc}')
             raise
         self.get_logger().info(f'Connected to {self.serial.port}')
+    
+    def sensorRequestCallback(self, msg: UInt8):
+        self.request_data(SensorType(msg.data))
 
-    def read_serial(self):
-        # Checks if any data on serial, if so, update the values
-        pass
+    def read_serial(self, wait_time: float = 0.1):
+        now = time.time()
+        while time.time() - now < wait_time:
+            if self.serial.in_waiting > 0:
+                msg = self.serial.readline().decode('utf-8').strip()
+                break
+        
+        msgSplit = msg.split(':')
 
+        if msgSplit[0] in RESPONSE_HEADERS and len(msgSplit) > 1:
+            sensorType = RESPONSE_HEADERS[msgSplit[0]]
+            match sensorType:
+                case SensorType.POTENTIOMETER:
+                    self.updatePotValue(msgSplit[1])
+                case SensorType.THERMISTOR:
+                    self.updateThermistorValue(msgSplit[1])
+                case SensorType.ULTRASONIC:
+                    self.updateUltrasonicValue(msgSplit[1])
+                case SensorType.SLOT:
+                    self.updateSlotValue(msgSplit[1])
+                case SensorType.TOF:
+                    self.updateTofValue(msgSplit[1])
+        else:
+            self.get_logger().warning(f'Response not recognized: {msg}')        
+
+    # region Sensor Value Update Functions
     def request_data(self, sensor_type: SensorType):
         # Sends a request to the Arduino to get some sensor reading
         self.serial.write(REQUEST_MSGS[sensor_type])
+    
+    def updatePotValue(self, value: str):
+        self.sensor_values[SensorType.POTENTIOMETER] = int(value)
+        self.pot_pub.publish(Int32(data=self.sensor_values[SensorType.POTENTIOMETER]))
+    
+    def updateThermistorValue(self, value: str):
+        self.sensor_values[SensorType.THERMISTOR] = int(value)
+        self.thermistor_pub.publish(Int32(data=self.sensor_values[SensorType.THERMISTOR]))
+    
+    def updateUltrasonicValue(self, value: str):
+        self.sensor_values[SensorType.ULTRASONIC] = int(value)
+        self.ultrasonic_pub.publish(Int32(data=self.sensor_values[SensorType.ULTRASONIC]))
+    
+    def updateSlotValue(self, value: str):
+        self.sensor_values[SensorType.SLOT] = bool(int(value))
+        self.slot_pub.publish(Bool(data=self.sensor_values[SensorType.SLOT]))
+    
+    def updateTofValue(self, value: str):
+        self.sensor_values[SensorType.TOF] = int(value)
+        self.tof_pub.publish(Int32(data=self.sensor_values[SensorType.TOF]))
+    # endregion Sensor Value Update Functions
 
 def main(args=None):
     """Run the communications node until shutdown."""
@@ -70,7 +133,10 @@ def main(args=None):
     node = None
     try:
         node = CommsNode()
-        rclpy.spin(node)
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.01)
+            if node.serial.in_waiting > 0:
+                node.read_serial()
     except serial.SerialException:
         pass
     except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
