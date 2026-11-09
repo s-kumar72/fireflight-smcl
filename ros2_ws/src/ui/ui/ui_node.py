@@ -1,5 +1,5 @@
 # Start the UI: ros2 run ui ui_node
-"""Layout-only rqt panel for the FireFlight user interface."""
+"""FireFlight rqt panel with ROS sensor and motor topics."""
 
 from python_qt_binding.QtCore import Qt, QTimer
 from python_qt_binding.QtWidgets import (
@@ -7,13 +7,48 @@ from python_qt_binding.QtWidgets import (
     QSlider, QVBoxLayout, QWidget,
 )
 from rqt_gui_py.plugin import Plugin
+from std_msgs.msg import String, Int32, Bool
+
+from comms.types import SensorType, MotorType
 
 
 class UiWidget(QWidget):
     """Display sensor controls, chart placeholders, and motor cells."""
 
-    def __init__(self):
+    def __init__(self, node=None):
         super().__init__()
+        self._node = node
+        self._subscriptions = []
+        self.motor_command_pub = None
+
+        # region Values
+        self.sensor_values = {
+            SensorType.POTENTIOMETER: 0,
+            SensorType.THERMISTOR: 0,
+            SensorType.ULTRASONIC: 0,
+            SensorType.SLOT: False,
+            SensorType.TOF: 0,
+            SensorType.DC_ENCODER: 0,
+        }
+
+        if node is not None:
+            # region Publishers and Subscribers
+            self.motor_command_pub = node.create_publisher(String, 'motor_commands', 10)
+
+            self.pot_sub = node.create_subscription(Int32, 'potentiometer', self.pot_callback, 10)
+            self.thermistor_sub = node.create_subscription(Int32, 'thermistor', self.thermistor_callback, 10)
+            self.ultrasonic_sub = node.create_subscription(Int32, 'ultrasonic', self.ultrasonic_callback, 10)
+            self.slot_sub = node.create_subscription(Bool, 'slot', self.slot_callback, 10)
+            self.tof_sub = node.create_subscription(Int32, 'tof', self.tof_callback, 10)
+
+            self.dc_encoder_sub = node.create_subscription(Int32, 'dc_encoder', self.dc_encoder_callback, 10)
+            # Stepper and servo are technically open-loop, so no subs for these
+            # endregion Publishers and Subscribers
+
+            self._subscriptions = [self.pot_sub, self.thermistor_sub,
+                self.ultrasonic_sub, self.slot_sub, self.tof_sub, self.dc_encoder_sub]
+
+        # region UI Setup
         self.setObjectName('FireFlightUi')
         self.setWindowTitle('FireFlight')
         self.resize(1000, 750)
@@ -40,7 +75,7 @@ class UiWidget(QWidget):
                 font-size: 18px;
             }
         ''')
-
+        
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(16)
@@ -49,7 +84,87 @@ class UiWidget(QWidget):
             'Time-of-Flight',
         ], sensors=True), 1)
         layout.addWidget(self._column(['Servo', 'Stepper', 'DC']), 1)
+        # endregion UI Setup
+    # region Publisher and Subscriber Functions
+    def send_motor_command(self, motor_type: MotorType, command: str):
+        if self.motor_command_pub is None:
+            raise RuntimeError("Motor commands require a ROS node")
+        msg = String()
+        msg.data = f"{motor_type.value}:{command}"
+        self.motor_command_pub.publish(msg)
 
+    def pot_callback(self, msg: Int32):
+        self.sensor_values[SensorType.POTENTIOMETER] = msg.data
+
+    def thermistor_callback(self, msg: Int32):
+        self.sensor_values[SensorType.THERMISTOR] = msg.data
+
+    def ultrasonic_callback(self, msg: Int32):
+        self.sensor_values[SensorType.ULTRASONIC] = msg.data
+
+    def slot_callback(self, msg: Bool):
+        self.sensor_values[SensorType.SLOT] = msg.data
+
+    def tof_callback(self, msg: Int32):
+        self.sensor_values[SensorType.TOF] = msg.data
+
+    def dc_encoder_callback(self, msg: Int32):
+        self.sensor_values[SensorType.DC_ENCODER] = msg.data
+
+    # endregion Subscriber Callbacks
+
+    # region Update Functions
+    def update_ui(self):
+        self.update_pot_ui()
+        self.update_thermistor_ui()
+        self.update_ultrasonic_ui()
+        self.update_slot_ui()
+        self.update_tof_ui()
+        self.update_dc_encoder_ui()
+        self.update_servo_ui()
+        self.update_stepper_ui()
+        self.update_dc_ui()
+    
+    def update_pot_ui(self):
+        pass
+
+    def update_thermistor_ui(self):
+        pass
+
+    def update_ultrasonic_ui(self):
+        pass
+
+    def update_slot_ui(self):
+        pass
+
+    def update_tof_ui(self):
+        pass
+
+    def update_dc_encoder_ui(self):
+        pass
+
+    def update_servo_ui(self):
+        pass
+
+    def update_stepper_ui(self):
+        pass
+
+    def update_dc_ui(self):
+        pass
+
+    # endregion Update Functions
+
+    def shutdown(self):
+        """Release this panel's ROS entities; rqt owns the node."""
+        if self._node is not None:
+            for subscription in self._subscriptions:
+                self._node.destroy_subscription(subscription)
+            self._subscriptions.clear()
+            if self.motor_command_pub is not None:
+                self._node.destroy_publisher(self.motor_command_pub)
+                self.motor_command_pub = None
+
+    # region UI Functions
     @staticmethod
     def _column(labels, sensors=False):
         column = QWidget()
@@ -172,19 +287,23 @@ class UiWidget(QWidget):
 
         layout.addWidget(controls, 1)
         layout.addWidget(UiWidget._chart_placeholder(), 1)
+    # endregion UI Functions
 
 
 class UiPlugin(Plugin):
-    """Expose the layout as an rqt plugin without data connections."""
+    """Expose the panel using rqt's managed ROS node."""
 
     def __init__(self, context):
         super().__init__(context)
         self.setObjectName('FireFlightUiPlugin')
-        self.widget = UiWidget()
+        self.widget = UiWidget(context.node)
         context.add_widget(self.widget)
         # Wait until rqt has attached the panel to its main window.
         QTimer.singleShot(0, lambda: self.widget.window().showMaximized())
 
+
+    def shutdown_plugin(self):
+        self.widget.shutdown()
 
 def main(args=None):
     """Launch this panel in its own rqt window."""

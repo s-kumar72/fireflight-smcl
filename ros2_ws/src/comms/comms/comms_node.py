@@ -5,21 +5,8 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Int32, UInt8, String
 import serial
-import enum
+from comms.types import SensorType, MotorType
 import time
-
-class SensorType(enum.Enum):
-    POTENTIOMETER = 0
-    THERMISTOR = 1 
-    ULTRASONIC = 2
-    SLOT = 3
-    TOF = 4
-    DC_ENCODER = 5
-
-class MotorType(enum.Enum):
-    SERVO = 0
-    STEPPER = 1
-    DC = 2
 
 SERIAL_PORT = "COM3"
 BAUD_RATE = 115200
@@ -70,8 +57,9 @@ class CommsNode(Node):
         self.tof_pub = self.create_publisher(Int32, 'tof', 10) # 0~4000
         self.dc_encoder_pub = self.create_publisher(Int32, 'dc_encoder', 10) # 0-4096, mapping tbd
 
-        self.read_request_sub = self.create_subscription(
-            UInt8, 'sensor_read_requests', self.sensorRequestCallback, 100)
+        # Was thinking don't request from UI, just request here repeatedly
+        # self.read_request_sub = self.create_subscription(
+        #     UInt8, 'sensor_read_requests', self.sensorRequestCallback, 100)
 
         self.motor_command_sub = self.create_subscription(
             String, 'motor_commands', self.motorCommandCallback, 100)
@@ -99,8 +87,8 @@ class CommsNode(Node):
         command = MOTOR_COMMAND_HEADERS[motorType] + ':' + msgSplit[1] + '\n'
         self.serial.write(command.encode('utf-8'))
 
-    def sensorRequestCallback(self, msg: UInt8):
-        self.request_data(SensorType(msg.data))
+    # def sensorRequestCallback(self, msg: UInt8):
+    #     self.request_data(SensorType(msg.data))
 
     def read_serial(self, wait_time: float = 0.1):
         now = time.time()
