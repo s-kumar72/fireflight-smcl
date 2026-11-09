@@ -1,3 +1,4 @@
+# Start the comms node: ros2 run comms comms_node
 """ROS 2 node communication between the Arduino and the UI"""
 
 import rclpy
@@ -9,7 +10,7 @@ import time
 
 class SensorType(enum.Enum):
     POTENTIOMETER = 0
-    THERMISTOR = 1
+    THERMISTOR = 1 
     ULTRASONIC = 2
     SLOT = 3
     TOF = 4
