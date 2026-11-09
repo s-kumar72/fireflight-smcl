@@ -215,7 +215,13 @@ class UiWidget(QWidget):
             slider.setEnabled(False)
             controls_layout.addWidget(slider)
             endpoints = QHBoxLayout()
-            for text, alignment in [('a', Qt.AlignLeft), ('b', Qt.AlignRight)]:
+            bounds = {
+                'Potentiometer': ('0%', '100%'),
+                'Thermistor': ('0°C', '50°C'),
+                'Ultrasonic': ('0 m', '6.45 m'),
+                'Time-of-Flight': ('0 m', '4 m'),
+            }[name]
+            for text, alignment in zip(bounds, (Qt.AlignLeft, Qt.AlignRight)):
                 endpoint = QLabel(text)
                 endpoint.setAlignment(alignment)
                 endpoint.setStyleSheet('font-size: 15px; font-weight: normal;')
@@ -275,7 +281,7 @@ class UiWidget(QWidget):
         slider.setRange(0, 180 if name == 'Servo' else 100)
         contents.addWidget(slider)
         endpoints = QHBoxLayout()
-        bounds = ('0', '180°') if name == 'Servo' else ('a', 'b')
+        bounds = ('0°', '180°') if name == 'Servo' else ('a', 'b')
         for text, alignment in zip(bounds, (Qt.AlignLeft, Qt.AlignRight)):
             endpoint = QLabel(text)
             endpoint.setAlignment(alignment)
