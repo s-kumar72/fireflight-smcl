@@ -10,6 +10,9 @@ void handleRequest(const char* cmd){
     Serial.print(potRaw());
     Serial.print('\n');
   }
+  else if (strcmp(cmd, "REQ:THERM") == 0) {
+    thermHandleRequest();
+  }
 }
 
 void serialUpdate(){
