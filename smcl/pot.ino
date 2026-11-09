@@ -1,30 +1,25 @@
-#include <cstdio>
 #include <Arduino.h>
 
-#define POT A0
-#define ENA 5  // STEPPER PWM
-#define IN1 7
-#define IN2 8
+const uint8_t POT_PIN = A0;
+const float POT_TRAVEL_DEG = 280.0; // from datasheet for Bourns 3386 trimpot
 
-char buffer[60];
+int potRawValue = 0;
+float potDegValue = 0.0;
 
-
-void potControl(){
-  int potValue = analogRead(POT);
-  snprintf(buffer, sizeof(buffer), "Pot value: %d", potValue);
-  Serial.println(buffer);
-
-  float motorSpeed = potValue;
-
+void potSetup(){
+  // no pin node for analog pins
 }
 
-void setup() {
-  // put your setup code here, to run once:
-
-
+void potUpdate(){
+  potRawValue = analogRead(POT_PIN);
+  potDegValue = potRawValue * (POT_TRAVEL_DEG / 1023.0);
 }
 
-void loop() {
-  // put your main code here, to run repeatedly:
+// to interface with smcl.ino
+int potRaw(){
+  return potRawValue;
+}
 
+float potDegrees(){
+  return potDegValue;
 }
