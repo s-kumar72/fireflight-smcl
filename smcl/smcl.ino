@@ -2,6 +2,9 @@
 #include <Arduino.h>
 
 #define POT A0
+#define ENA 5  // STEPPER PWM
+#define IN1 7
+#define IN2 8
 
 char buffer[60];
 
