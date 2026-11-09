@@ -9,7 +9,7 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name, ['package.xml', 'plugin.xml']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -18,6 +18,8 @@ setup(
     description='User interface for FireFlight.',
     license='TODO: License declaration',
     entry_points={
-        'console_scripts': [],
+        'console_scripts': [
+            'ui_node = ui.ui_node:main',
+        ],
     },
 )
