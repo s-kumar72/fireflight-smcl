@@ -10,6 +10,12 @@ void handleRequest(const char* cmd){
     Serial.print(potRaw());
     Serial.print('\n');
   }
+  else if (strcmp(cmd, "REQ:THERM") == 0) {
+    thermHandleRequest();
+  }
+  else if (strncmp(cmd, "SER:", 4) == 0) {
+    servoHandleCommand(cmd + 4);
+  }
 }
 
 void serialUpdate(){
@@ -33,6 +39,7 @@ void setup() {
   Serial.begin(115200);
   potSetup();
   stepperSetup();
+  servoSetup();
 
 }
 
@@ -44,4 +51,5 @@ void loop() {
   stepperMoveToDeg(potDegrees());
 
   stepperUpdate();
+  servoUpdate();
 }
