@@ -15,6 +15,11 @@ void handleRequest(const char* cmd){
   }
   else if (strncmp(cmd, "SER:", 4) == 0) {
     servoHandleCommand(cmd + 4);
+  } 
+  else if (strcmp(cmd, "REQ:SLOT") == 0) {
+    Serial.print("SLT: ");
+    Serial.print(slotReading());
+    Serial.print('\n');
   }
 }
 
@@ -52,4 +57,5 @@ void loop() {
 
   stepperUpdate();
   servoUpdate();
+  slotReading();
 }
