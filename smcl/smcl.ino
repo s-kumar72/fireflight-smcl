@@ -1,30 +1,55 @@
-#include <cstdio>
 #include <Arduino.h>
 
-#define POT A0
-#define ENA 5  // STEPPER PWM
-#define IN1 7
-#define IN2 8
+const uint8_t CMD_MAX = 32;
+char cmdBuf[CMD_MAX];
+uint8_t cmdLen = 0;
 
-char buffer[60];
+void handleRequest(const char* cmd){
+  if (strcmp(cmd, "REQ:POT") == 0){
+    Serial.print("POT: ");
+    Serial.print(potRaw());
+    Serial.print('\n');
+  }
+  else if (strcmp(cmd, "REQ:THERM") == 0) {
+    thermHandleRequest();
+  }
+  else if (strncmp(cmd, "SER:", 4) == 0) {
+    servoHandleCommand(cmd + 4);
+  }
+}
 
-
-void potControl(){
-  int potValue = analogRead(POT);
-  snprintf(buffer, sizeof(buffer), "Pot value: %d", potValue);
-  Serial.println(buffer);
-
-  float motorSpeed = potValue;
-
+void serialUpdate(){
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\r') continue;
+    if (c == '\n') {
+      cmdBuf[cmdLen] = '\0';
+      if (cmdLen > 0){
+        handleRequest(cmdBuf);
+        cmdLen = 0;
+      }
+    } else if (cmdLen < CMD_MAX - 1) {
+      cmdBuf[cmdLen++] = c;
+    }
+  }
 }
 
 void setup() {
   // put your setup code here, to run once:
-
+  Serial.begin(115200);
+  potSetup();
+  stepperSetup();
+  servoSetup();
 
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
+  potUpdate();
+  serialUpdate();
 
+  stepperMoveToDeg(potDegrees());
+
+  stepperUpdate();
+  servoUpdate();
 }

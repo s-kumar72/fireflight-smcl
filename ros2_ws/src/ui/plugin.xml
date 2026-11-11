@@ -1,0 +1,10 @@
+<library path="src">
+  <class name="FireFlight UI" type="ui.ui_node.UiPlugin" base_class_type="rqt_gui_py::Plugin">
+    <description>FireFlight sensor and motor layout.</description>
+    <qtgui>
+      <group><label>FireFlight</label></group>
+      <label>FireFlight UI</label>
+      <statustip>Show the sensor and motor layout.</statustip>
+    </qtgui>
+  </class>
+</library>
