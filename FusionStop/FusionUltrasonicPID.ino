@@ -264,10 +264,19 @@ void loop() {
     // 3. MONITORING (ultrasonic/motor output identical to the ultrasonic sketch,
     //    ToF + scene fields appended at the end of the same line)
 
-    Serial.print("Distance (Ultrasonic Sensor): ");
+    Serial.print("Ultrasonic Distance (Unfiltered): ");
+    Serial.print(distance);
+    
+    Serial.print("Ultrasonic Distance (Filtered): ");
     Serial.print(filteredDistance);
 
-    Serial.print(" mm | Desired RPM: ");
+    Serial.print(" mm | TOF Distance: ");
+    Serial.print(tofRawMm);
+
+    Serial.print(" mm | Scene: ");
+    Serial.println(sceneName(confirmed));
+
+    Serial.print(" | Desired RPM: ");
     Serial.print(desiredRPM);
 
     Serial.print(" | Actual RPM: ");
@@ -275,14 +284,5 @@ void loop() {
 
     Serial.print(" | PWM: ");
     Serial.print(pwm);
-
-    Serial.print(" | TOF Distance: ");
-    Serial.print(tofRawMm);
-
-    Serial.print(" mm (status ");
-    Serial.print(tofStatus);
-
-    Serial.print(") | Scene: ");
-    Serial.println(sceneName(confirmed));
   }
 }
