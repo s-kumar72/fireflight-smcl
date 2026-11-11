@@ -1,35 +1,166 @@
 # Start the UI: ros2 run ui ui_node
 """FireFlight rqt panel with ROS sensor and motor topics."""
 
-from python_qt_binding.QtCore import Qt, QTimer
+from collections import deque
+import math
+from threading import Lock
+import time
+
+from python_qt_binding.QtCore import Qt, QTimer, Signal
 from python_qt_binding.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy,
     QSlider, QVBoxLayout, QWidget,
 )
 from rqt_gui_py.plugin import Plugin
 from std_msgs.msg import String, Int32, Bool
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
 
 from comms.types import SensorType, MotorType
 
+UPDATE_PERIOD = 1.0  # Seconds between UI refreshes.
+EST_DATA_FREQ = 5.0  # Hz
+EST_DATA_PERIOD = 1.0 / EST_DATA_FREQ
+HISTORY_NOMINAL_LEN = round(60 * EST_DATA_FREQ)  # One minute of samples.
+
+ADC_FULL_SCALE = 1023.0
+
+# NTCLE100E3103: 10 kΩ at 25 °C, B25/85 = 3977 K.
+# Vishay 29049 formula (2), material A. The 10 kΩ divider is the pull-up;
+# the thermistor is from the ADC pin to ground.
+THERMISTOR_R25 = 10000.0
+THERMISTOR_SERIES = 10000.0
+THERMISTOR_A1 = 3.354016e-3
+THERMISTOR_B1 = 2.569850e-4
+THERMISTOR_C1 = 2.620131e-6
+THERMISTOR_D1 = 6.383091e-8
+
+# LV-MaxSonar-EZ analog output is (Vcc/512) volts per inch. A 10-bit ADC
+# using that same Vcc therefore has 1024/512 = 2 counts per inch.
+ULTRASONIC_COUNTS_PER_INCH = 1024.0 / 512.0
+INCH_TO_METER = 0.0254
+ULTRASONIC_MAX_METERS = 254.0 * INCH_TO_METER
+
+# VL53L1X reports ranging distance in millimeters. Long mode reaches 4 m.
+TOF_MAX_METERS = 4.0
+
+def thermistor_celsius(raw):
+    """Convert a 10-bit ADC count to Celsius for the 10 kΩ NTCLE100."""
+    if raw <= 0 or raw >= ADC_FULL_SCALE:
+        return None
+    resistance = THERMISTOR_SERIES * raw / (ADC_FULL_SCALE - raw)
+    log_ratio = math.log(resistance / THERMISTOR_R25)
+    kelvin = 1.0 / (
+        THERMISTOR_A1
+        + THERMISTOR_B1 * log_ratio
+        + THERMISTOR_C1 * log_ratio ** 2
+        + THERMISTOR_D1 * log_ratio ** 3
+    )
+    return kelvin - 273.15
+
+def ultrasonic_meters(raw):
+    """Convert a 10-bit MaxBotix analog count to meters."""
+    inches = raw / ULTRASONIC_COUNTS_PER_INCH
+    return inches * INCH_TO_METER
+
+def tof_meters(millimeters):
+    """Convert a VL53L1X ranging result, in millimeters, to meters."""
+    return millimeters / 1000.0
+
+class SensorChart(FigureCanvasQTAgg):
+    """Plot a history snapshot with derived and raw values on separate axes."""
+
+    def __init__(self, derived_label=None, raw_label=None, binary=False):
+        figure = Figure(figsize=(3, 1.2), dpi=100)
+        super().__init__(figure)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self.setMinimumSize(0, 90)
+        figure.subplots_adjust(left=0.23, right=0.77, bottom=0.32, top=0.94)
+        self.axes = figure.add_subplot(111)
+        self.axes.set_xlabel('Time relative to latest sample (s)', fontsize=6)
+        self.axes.tick_params(labelsize=6)
+        self.axes.grid(True, alpha=0.25)
+        self.derived_line = None
+        self.raw_axes = None
+        self.raw_line = None
+        if derived_label:
+            self.axes.set_ylabel(derived_label, fontsize=7, color='tab:blue')
+            self.axes.tick_params(axis='y', colors='tab:blue')
+            self.derived_line, = self.axes.plot(
+                [], [], color='tab:blue', marker='.', markersize=3,
+                drawstyle='steps-post' if binary else 'default')
+        else:
+            self.axes.yaxis.set_visible(False)
+        if binary:
+            self.axes.set_yticks([0, 1], labels=['Clear', 'Blocked'])
+            self.axes.set_ylim(-0.1, 1.1)
+        self.binary = binary
+        if raw_label:
+            self.raw_axes = self.axes.twinx()
+            self.raw_axes.set_ylabel(raw_label, fontsize=7, color='tab:orange')
+            self.raw_axes.tick_params(labelsize=6, axis='y', colors='tab:orange')
+            self.raw_line, = self.raw_axes.plot(
+                [], [], color='tab:orange', linestyle='--', marker='.', markersize=3)
+        self.axes.set_xlim(-1, 0)
+
+    def set_history(self, history):
+        if not history:
+            return
+        times = [sample[0] - history[-1][0] for sample in history]
+        if self.derived_line is not None:
+            index = 2 if self.raw_line is not None else 1
+            self.derived_line.set_data(times, [
+                float('nan') if sample[index] is None else sample[index]
+                for sample in history])
+            if not self.binary:
+                self.axes.relim()
+                self.axes.autoscale_view(scalex=False)
+        if self.raw_line is not None:
+            self.raw_line.set_data(times, [sample[1] for sample in history])
+            self.raw_axes.relim()
+            self.raw_axes.autoscale_view(scalex=False)
+        self.axes.set_xlim(min(-1.0, times[0]), 0)
+        self.draw_idle()
+
 
 class UiWidget(QWidget):
-    """Display sensor controls, chart placeholders, and motor cells."""
+    """Display sensor controls, history graphs, and motor cells."""
+
+    sensor_history_updated = Signal(object, object)
 
     def __init__(self, node=None):
         super().__init__()
         self._node = node
         self._subscriptions = []
         self.motor_command_pub = None
+        self.sensor_labels = {}
+        self.sensor_sliders = {}
+        self.sensor_charts = {}
+        self.motor_charts = {}
+        self._history_lock = Lock()
 
         # region Values
         self.sensor_values = {
-            SensorType.POTENTIOMETER: 0,
-            SensorType.THERMISTOR: 0,
-            SensorType.ULTRASONIC: 0,
-            SensorType.SLOT: False,
-            SensorType.TOF: 0,
+            SensorType.POTENTIOMETER: None,
+            SensorType.THERMISTOR: None,
+            SensorType.ULTRASONIC: None,
+            SensorType.SLOT: None,
+            SensorType.TOF: None,
             SensorType.DC_ENCODER: 0,
         }
+
+        self.data_history = {
+            SensorType.POTENTIOMETER: self._history(), # [timestamp, rawValue, percent]
+            SensorType.THERMISTOR: self._history(), # [timestamp, raw ADC, celsius]
+            SensorType.ULTRASONIC: self._history(), # [timestamp, raw ADC, meters]
+            SensorType.SLOT: self._history(), # [timestamp, isBlocked]
+            SensorType.TOF: self._history(), # [timestamp, millimeters, meters]
+            MotorType.SERVO: self._history(), # [timestamp, position]
+            MotorType.STEPPER: self._history(), # [timestamp, rpm]
+            SensorType.DC_ENCODER: self._history(), # [timestamp, position]
+        }
+
+        #endregion Values
 
         if node is not None:
             # region Publishers and Subscribers
@@ -66,11 +197,6 @@ class UiWidget(QWidget):
                 background: transparent;
                 border: none;
             }
-            QFrame[chartPlaceholder="true"] {
-                background-color: #f8fafc;
-                border: 1px dashed #aab4bf;
-                border-radius: 3px;
-            }
             QLabel[valuePlaceholder="true"] {
                 font-size: 18px;
             }
@@ -83,8 +209,15 @@ class UiWidget(QWidget):
             'Potentiometer', 'Thermistor', 'Ultrasonic', 'Slot',
             'Time-of-Flight',
         ], sensors=True), 1)
-        layout.addWidget(self._column(['Servo', 'Stepper', 'DC']), 1)
+        layout.addWidget(self._column([
+            'Servo', 'Stepper', 'DC', 'Smoke detection placeholder',
+        ]), 1)
+        self.sensor_history_updated.connect(self._refresh_sensor_chart, Qt.QueuedConnection)
         # endregion UI Setup
+        # rqt receives messages on worker threads; update widgets on Qt's thread.
+        self._update_timer = QTimer(self)
+        self._update_timer.timeout.connect(self.update_ui)
+        self._update_timer.start(round(UPDATE_PERIOD * 1000))
     # region Publisher and Subscriber Functions
     def send_motor_command(self, motor_type: MotorType, command: str):
         if self.motor_command_pub is None:
@@ -93,23 +226,50 @@ class UiWidget(QWidget):
         msg.data = f"{motor_type.value}:{command}"
         self.motor_command_pub.publish(msg)
 
+    @staticmethod
+    def _history():
+        """Fixed-length buffer; appending past the end drops the oldest sample."""
+        return deque(maxlen=HISTORY_NOMINAL_LEN)
+
+    def _record(self, key, *fields):
+        # Read the full history for every callback; only touch plots on Qt's thread.
+        with self._history_lock:
+            self.data_history[key].append((time.time(), *fields))
+            history = list(self.data_history[key])
+        self.sensor_history_updated.emit(key, history)
+
+    def _refresh_sensor_chart(self, sensor, history):
+        self.sensor_charts[sensor].set_history(history)
+
     def pot_callback(self, msg: Int32):
-        self.sensor_values[SensorType.POTENTIOMETER] = msg.data
+        raw = msg.data
+        self.sensor_values[SensorType.POTENTIOMETER] = raw
+        self._record(SensorType.POTENTIOMETER, raw, raw * 100.0 / 1023.0)
 
     def thermistor_callback(self, msg: Int32):
-        self.sensor_values[SensorType.THERMISTOR] = msg.data
+        raw = msg.data
+        self.sensor_values[SensorType.THERMISTOR] = raw
+        celsius = thermistor_celsius(raw)
+        self._record(SensorType.THERMISTOR, raw, celsius)
 
     def ultrasonic_callback(self, msg: Int32):
-        self.sensor_values[SensorType.ULTRASONIC] = msg.data
+        raw = msg.data
+        self.sensor_values[SensorType.ULTRASONIC] = raw
+        self._record(SensorType.ULTRASONIC, raw, ultrasonic_meters(raw))
 
     def slot_callback(self, msg: Bool):
         self.sensor_values[SensorType.SLOT] = msg.data
+        self._record(SensorType.SLOT, msg.data)
 
     def tof_callback(self, msg: Int32):
-        self.sensor_values[SensorType.TOF] = msg.data
+        millimeters = msg.data
+        self.sensor_values[SensorType.TOF] = millimeters
+        self._record(SensorType.TOF, millimeters, tof_meters(millimeters))
 
     def dc_encoder_callback(self, msg: Int32):
-        self.sensor_values[SensorType.DC_ENCODER] = msg.data
+        position = msg.data
+        self.sensor_values[SensorType.DC_ENCODER] = position
+        self._record(SensorType.DC_ENCODER, position)
 
     # endregion Subscriber Callbacks
 
@@ -126,19 +286,45 @@ class UiWidget(QWidget):
         self.update_dc_ui()
     
     def update_pot_ui(self):
-        pass
+        raw = self.sensor_values[SensorType.POTENTIOMETER]
+        if raw is not None:
+            percent = raw * 100.0 / 1023.0
+            self._update_sensor_display(SensorType.POTENTIOMETER, percent,
+                                        f'{percent:.1f}%', 100.0)
 
     def update_thermistor_ui(self):
-        pass
+        raw = self.sensor_values[SensorType.THERMISTOR]
+        if raw is not None:
+            celsius = thermistor_celsius(raw)
+            if celsius is not None:
+                self._update_sensor_display(SensorType.THERMISTOR, celsius,
+                                            f'{celsius:.1f}°C', 50.0)
 
     def update_ultrasonic_ui(self):
-        pass
+        raw = self.sensor_values[SensorType.ULTRASONIC]
+        if raw is not None:
+            meters = ultrasonic_meters(raw)
+            self._update_sensor_display(SensorType.ULTRASONIC, meters,
+                                        f'{meters:.2f} m', ULTRASONIC_MAX_METERS)
 
     def update_slot_ui(self):
-        pass
+        blocked = self.sensor_values[SensorType.SLOT]
+        if blocked is not None:
+            self.sensor_labels[SensorType.SLOT].setText(
+                'STATE: Blocked' if blocked else 'STATE: Clear')
 
     def update_tof_ui(self):
-        pass
+        millimeters = self.sensor_values[SensorType.TOF]
+        if millimeters is not None:
+            meters = tof_meters(millimeters)
+            self._update_sensor_display(SensorType.TOF, meters,
+                                        f'{meters:.2f} m', TOF_MAX_METERS)
+
+    def _update_sensor_display(self, sensor, value, text, maximum):
+        self.sensor_labels[sensor].setText(f'Value: {text}')
+        slider = self.sensor_sliders[sensor]
+        fraction = max(0.0, min(1.0, value / maximum))
+        slider.setValue(round(fraction * slider.maximum()))
 
     def update_dc_encoder_ui(self):
         pass
@@ -156,6 +342,7 @@ class UiWidget(QWidget):
 
     def shutdown(self):
         """Release this panel's ROS entities; rqt owns the node."""
+        self._update_timer.stop()
         if self._node is not None:
             for subscription in self._subscriptions:
                 self._node.destroy_subscription(subscription)
@@ -165,8 +352,7 @@ class UiWidget(QWidget):
                 self.motor_command_pub = None
 
     # region UI Functions
-    @staticmethod
-    def _column(labels, sensors=False):
+    def _column(self, labels, sensors=False):
         column = QWidget()
         column.setMinimumWidth(0)
         column.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
@@ -181,14 +367,24 @@ class UiWidget(QWidget):
             contents.setContentsMargins(12, 10, 12, 10)
             contents.setSpacing(12)
             if sensors:
-                UiWidget._sensor_contents(contents, text)
+                self._sensor_contents(contents, text)
+            elif text == 'Smoke detection placeholder':
+                label = QLabel(text)
+                label.setAlignment(Qt.AlignCenter)
+                contents.addWidget(label)
             else:
-                UiWidget._motor_contents(contents, text)
-            layout.addWidget(cell, 1)
+                self._motor_contents(contents, text)
+            layout.addWidget(cell, 1 if text == 'Smoke detection placeholder' else 2)
         return column
 
-    @staticmethod
-    def _sensor_contents(layout, name):
+    def _sensor_contents(self, layout, name):
+        sensor = {
+            'Potentiometer': SensorType.POTENTIOMETER,
+            'Thermistor': SensorType.THERMISTOR,
+            'Ultrasonic': SensorType.ULTRASONIC,
+            'Slot': SensorType.SLOT,
+            'Time-of-Flight': SensorType.TOF,
+        }[name]
         controls = QWidget()
         controls.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         controls_layout = QVBoxLayout(controls)
@@ -202,17 +398,25 @@ class UiWidget(QWidget):
         controls_layout.addLayout(header)
         controls_layout.addStretch(1)
 
-        if name != 'Slot':
+        if name == 'Slot':
+            state = QLabel('STATE: —')
+            state.setProperty('valuePlaceholder', True)
+            state.setAlignment(Qt.AlignCenter)
+            controls_layout.addWidget(state)
+            self.sensor_labels[sensor] = state
+        else:
             value = QLabel('Value: —')
             value.setProperty('valuePlaceholder', True)
             value.setTextInteractionFlags(Qt.TextSelectableByMouse)
             value.setAlignment(Qt.AlignTop | Qt.AlignRight)
             header.addWidget(value)
+            self.sensor_labels[sensor] = value
             slider = QSlider(Qt.Horizontal)
             slider.setAccessibleName(f'{name} slider')
-            slider.setRange(0, 100)
+            slider.setRange(0, 1000)
             slider.setValue(0)
             slider.setEnabled(False)
+            self.sensor_sliders[sensor] = slider
             controls_layout.addWidget(slider)
             endpoints = QHBoxLayout()
             bounds = {
@@ -231,21 +435,19 @@ class UiWidget(QWidget):
         controls_layout.addStretch(1)
         layout.addWidget(controls, 2)
 
-        layout.addWidget(UiWidget._chart_placeholder(), 3)
+        chart = {
+            SensorType.POTENTIOMETER: ('Position (%)', 'Raw ADC'),
+            SensorType.THERMISTOR: ('Temperature (°C)', 'Raw ADC'),
+            SensorType.ULTRASONIC: ('Distance (m)', 'Raw ADC'),
+            SensorType.SLOT: ('Slot state', None),
+            SensorType.TOF: ('Distance (m)', 'Raw (mm)'),
+        }[sensor]
+        self.sensor_charts[sensor] = SensorChart(
+            *chart, binary=sensor == SensorType.SLOT)
+        self.sensor_charts[sensor].setAccessibleName(f'{name} history graph')
+        layout.addWidget(self.sensor_charts[sensor], 3)
 
-    @staticmethod
-    def _chart_placeholder():
-        chart = QFrame()
-        chart.setProperty('chartPlaceholder', True)
-        chart.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
-        chart_layout = QVBoxLayout(chart)
-        chart_label = QLabel('Chart placeholder')
-        chart_label.setAlignment(Qt.AlignCenter)
-        chart_layout.addWidget(chart_label)
-        return chart
-
-    @staticmethod
-    def _motor_contents(layout, name):
+    def _motor_contents(self, layout, name):
         controls = QWidget()
         controls.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         contents = QVBoxLayout(controls)
@@ -292,7 +494,20 @@ class UiWidget(QWidget):
             contents.addStretch(1)
 
         layout.addWidget(controls, 1)
-        layout.addWidget(UiWidget._chart_placeholder(), 1)
+        if name == 'DC':
+            chart = SensorChart(raw_label='Encoder position (counts)')
+            chart.setAccessibleName('DC encoder history graph')
+            self.sensor_charts[SensorType.DC_ENCODER] = chart
+            layout.addWidget(chart, 1)
+        else:
+            motor = MotorType.SERVO if name == 'Servo' else MotorType.STEPPER
+            chart = SensorChart(
+                derived_label='Position (°)' if name == 'Servo' else 'Speed (RPM)')
+            if name == 'Servo':
+                chart.axes.set_ylim(0, 180)
+            chart.setAccessibleName(f'{name} history graph')
+            self.motor_charts[motor] = chart
+            layout.addWidget(chart, 1)
     # endregion UI Functions
 
 
