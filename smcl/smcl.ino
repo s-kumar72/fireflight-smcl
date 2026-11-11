@@ -18,7 +18,7 @@ void handleRequest(const char* cmd){
   } 
   else if (strcmp(cmd, "REQ:SLOT") == 0) {
     Serial.print("SLT: ");
-    Serial.print(slotReading());
+    Serial.print(slotHandleRequest());
     Serial.print('\n');
   }
 }
@@ -45,7 +45,7 @@ void setup() {
   potSetup();
   stepperSetup();
   servoSetup();
-
+  slotSetup();
 }
 
 void loop() {
@@ -57,5 +57,5 @@ void loop() {
 
   stepperUpdate();
   servoUpdate();
-  slotReading();
+  slotUpdate();
 }
