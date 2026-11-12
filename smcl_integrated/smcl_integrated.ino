@@ -7,7 +7,7 @@
   SENSOR_CONTROL (initial mode) / UI_CONTROL. No delays in the main loop.
   Sensor mode: pot -> stepper, thermistor -> servo, ultrasonic -> DC RPM.
   UI mode (115200 baud, newline terminated):
-    SER:0..90              absolute servo angle in degrees
+    SER:0..180             absolute servo angle in degrees
     STP:+:0..32767         relative stepper move in degrees (also STP:-:...)
     DCM:P:+:0..32767       absolute DC shaft angle from boot (also -)
     DCM:V:+:0..60          signed DC shaft RPM (also -); V with 0 stops
@@ -93,7 +93,7 @@ const uint8_t POT_PIN = A0, SONAR_PIN = A1, THERM_PIN = A3;
 const uint8_t ENCODER_A = 2, ENCODER_B = 3;
 const uint8_t MOTOR_PWM = 6, MOTOR_IN1 = 7, MOTOR_IN2 = 8;
 const uint8_t SERVO_PIN = 9, STEP_PIN = 10, DIR_PIN = 11;
-const float SERVO_MAX_DEG = 90.0f;
+const float SERVO_MAX_DEG = 180.0f;
 const float ENCODER_CPR = 420.0f;
 const float DEG_PER_STEP = 360.0f / (200L * 8);
 const unsigned long STEP_INTERVAL_US = 1000;
@@ -193,7 +193,6 @@ void buttonUpdate() {
 
 void servoSetDeg(float degrees) {
   servoDeg = constrain(degrees, 0.0f, SERVO_MAX_DEG);
-  // Keep the physical 0..180 degree calibration; 90 degrees is 1500 us.
   servo.writeMicroseconds(1000 + (int)(servoDeg * 1000.0f / 180.0f));
 }
 

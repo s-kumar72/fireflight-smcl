@@ -295,7 +295,7 @@ class UiWidget(QWidget):
         if self.motor_command_pub is None:
             return False
         if motor_type == MotorType.SERVO:
-            if not 0 <= value <= 90:
+            if not 0 <= value <= 180:
                 return False
             command = f'SER:{value}\n'
         else:
@@ -619,7 +619,7 @@ class UiWidget(QWidget):
 
         slider = QSlider(Qt.Horizontal)
         slider.setAccessibleName(f'{name} slider')
-        minimum, maximum = (0, 90) if name == 'Servo' else (-60, 60)
+        minimum, maximum = (0, 180) if name == 'Servo' else (-60, 60)
         slider.setRange(minimum, maximum)
         slider.setValue(0)
         self.motor_sliders[motor] = slider
@@ -627,7 +627,7 @@ class UiWidget(QWidget):
         slider.sliderReleased.connect(lambda: self._send_motor_slider(motor, force=True))
         contents.addWidget(slider)
         endpoints = QHBoxLayout()
-        bounds = ('0°', '90°') if name == 'Servo' else ('−60 RPM', '+60 RPM')
+        bounds = ('0°', '180°') if name == 'Servo' else ('−60 RPM', '+60 RPM')
         for text, alignment in zip(bounds, (Qt.AlignLeft, Qt.AlignRight)):
             endpoint = QLabel(text)
             endpoint.setAlignment(alignment)
