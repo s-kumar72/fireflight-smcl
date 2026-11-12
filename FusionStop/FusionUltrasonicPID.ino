@@ -185,7 +185,7 @@ void driveMotor(int pwm) {
 }
 
 // ======================= SETUP =======================
-void setup() {
+void ul_tof_setup() {
   Serial.begin(115200);
   Serial.println("BOOT,FusionUltrasonicPID starting");
 
@@ -214,7 +214,7 @@ void setup() {
 }
 
 // ======================= MAIN LOOP =======================
-void loop() {
+float ul_tof_update() {
   unsigned long now = millis();
 
   // 0. TOF update (non-blocking, polled every loop)
