@@ -222,7 +222,7 @@ void readSerial() {
 
 // -------- SETUP --------
 
-void setup() {
+void dcmotor_gui_setup() {
 
   Serial.begin(115200);
 
@@ -249,7 +249,7 @@ void setup() {
 
 // -------- MAIN LOOP --------
 
-void loop() {
+float dcmotor_gui_update() {
 
   readSerial();
 
