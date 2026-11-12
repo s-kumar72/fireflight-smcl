@@ -26,18 +26,16 @@ HISTORY_NOMINAL_LEN = round(60 * EST_DATA_FREQ)  # One minute of samples.
 MIN_CMD_DELAY = 0.2 # Seconds before sending a new command to the motor
 SLOT_RPM_EMA_PERIOD = 7
 SLOT_RPM_EMA_ALPHA = 2.0 / (SLOT_RPM_EMA_PERIOD + 1)
+SLOT_RPM_TIMEOUT = 3.0  # Seconds without a rising edge before reporting stopped.
 
 ADC_FULL_SCALE = 1023.0
 
-# NTCLE100E3103: 10 kΩ at 25 °C, B25/85 = 3977 K.
-# Vishay 29049 formula (2), material A. The 10 kΩ divider is the pull-up;
-# the thermistor is from the ADC pin to ground.
+# Match the beta-model conversion in smcl/thermistor.ino: 10 kΩ at 25 °C
+# with a 10 kΩ pull-up and the thermistor from the ADC pin to ground.
 THERMISTOR_R25 = 10000.0
 THERMISTOR_SERIES = 10000.0
-THERMISTOR_A1 = 3.354016e-3
-THERMISTOR_B1 = 2.569850e-4
-THERMISTOR_C1 = 2.620131e-6
-THERMISTOR_D1 = 6.383091e-8
+THERMISTOR_T0_K = 298.15
+THERMISTOR_BETA = 3950.0
 
 # LV-MaxSonar-EZ analog output is (Vcc/512) volts per inch. A 10-bit ADC
 # using that same Vcc therefore has 1024/512 = 2 counts per inch.
@@ -49,16 +47,13 @@ ULTRASONIC_MAX_METERS = 254.0 * INCH_TO_METER
 TOF_MAX_METERS = 4.0
 
 def thermistor_celsius(raw):
-    """Convert a 10-bit ADC count to Celsius for the 10 kΩ NTCLE100."""
+    """Convert a 10-bit ADC count using the Arduino thermistor beta model."""
     if raw <= 0 or raw >= ADC_FULL_SCALE:
         return None
     resistance = THERMISTOR_SERIES * raw / (ADC_FULL_SCALE - raw)
     log_ratio = math.log(resistance / THERMISTOR_R25)
     kelvin = 1.0 / (
-        THERMISTOR_A1
-        + THERMISTOR_B1 * log_ratio
-        + THERMISTOR_C1 * log_ratio ** 2
-        + THERMISTOR_D1 * log_ratio ** 3
+        1.0 / THERMISTOR_T0_K + log_ratio / THERMISTOR_BETA
     )
     return kelvin - 273.15
 
@@ -388,9 +383,18 @@ class UiWidget(QWidget):
         self.sensor_values[SensorType.ULTRASONIC] = raw
         self._record(SensorType.ULTRASONIC, raw, ultrasonic_meters(raw))
 
+    def _expire_slot_rpm(self, now):
+        if (self._slot_last_rising_time is None or
+                now - self._slot_last_rising_time < SLOT_RPM_TIMEOUT):
+            return False
+        self._slot_last_rising_time = None
+        self._slot_rpm_ema = None
+        return True
+
     def slot_callback(self, msg: Bool):
         previous = self.sensor_values[SensorType.SLOT]
         now = time.monotonic()
+        self._expire_slot_rpm(now)
         # Only an observed Clear -> Blocked transition counts as a rising edge.
         if msg.data and previous is False:
             if self._slot_last_rising_time is not None:
@@ -403,7 +407,7 @@ class UiWidget(QWidget):
                         + (1.0 - SLOT_RPM_EMA_ALPHA) * self._slot_rpm_ema)
             self._slot_last_rising_time = now
         self.sensor_values[SensorType.SLOT] = msg.data
-        # Hold the estimate between edges; repeated states must not advance the EMA.
+        # Hold between edges until the timeout; repeated states don't advance the EMA.
         self._record(SensorType.SLOT, self._slot_rpm_ema or 0.0)
 
     def tof_callback(self, msg: Int32):
@@ -453,6 +457,9 @@ class UiWidget(QWidget):
                                         f'{meters:.2f} m', ULTRASONIC_MAX_METERS)
 
     def update_slot_ui(self):
+        # Also expire when slot messages stop arriving altogether.
+        if self._expire_slot_rpm(time.monotonic()):
+            self._record(SensorType.SLOT, 0.0)
         blocked = self.sensor_values[SensorType.SLOT]
         if blocked is not None:
             self.sensor_labels[SensorType.SLOT].setText(
