@@ -24,6 +24,8 @@ EST_DATA_FREQ = 5.0  # Hz
 EST_DATA_PERIOD = 1.0 / EST_DATA_FREQ
 HISTORY_NOMINAL_LEN = round(60 * EST_DATA_FREQ)  # One minute of samples.
 MIN_CMD_DELAY = 0.2 # Seconds before sending a new command to the motor
+SLOT_RPM_EMA_PERIOD = 7
+SLOT_RPM_EMA_ALPHA = 2.0 / (SLOT_RPM_EMA_PERIOD + 1)
 
 ADC_FULL_SCALE = 1023.0
 
@@ -68,6 +70,64 @@ def ultrasonic_meters(raw):
 def tof_meters(millimeters):
     """Convert a VL53L1X ranging result, in millimeters, to meters."""
     return millimeters / 1000.0
+
+
+class SmokeFusion:
+    """Mirror FusionStop's filters, scene confirmation, and threshold hysteresis."""
+
+    STOP_MM = 300
+    RESTART_MM = 400
+    CONFIRM_N = 3
+    US_ALPHA = 0.3
+    TOF_ALPHA = 0.4
+
+    def __init__(self):
+        self.us_filtered_mm = None
+        self.tof_filtered_mm = None
+        self.tof_valid = False
+        self.candidate = 'CLEAR'
+        self.confirmed = 'CLEAR'
+        self.streak = 0
+        self.stopped = False  # Classification latch only; never commands a motor.
+        self._fresh = set()
+
+    def update(self, sensor, raw):
+        if sensor == SensorType.ULTRASONIC:
+            millimeters = raw / ULTRASONIC_COUNTS_PER_INCH * 25.4
+            previous = self.us_filtered_mm
+            self.us_filtered_mm = (millimeters if previous is None else
+                                   self.US_ALPHA * millimeters + (1 - self.US_ALPHA) * previous)
+        elif sensor == SensorType.TOF:
+            # The serial protocol has no range-status field; negative means no echo.
+            self.tof_valid = raw >= 0
+            if self.tof_valid:
+                previous = self.tof_filtered_mm
+                self.tof_filtered_mm = (raw if previous is None else
+                                        self.TOF_ALPHA * raw + (1 - self.TOF_ALPHA) * previous)
+        else:
+            return
+        self._fresh.add(sensor)
+        # Count fresh pairs, rather than counting the same samples on UI refreshes.
+        if len(self._fresh) < 2:
+            return
+        self._fresh.clear()
+        threshold = self.RESTART_MM if self.stopped else self.STOP_MM
+        us_near = int(self.us_filtered_mm) < threshold
+        tof_near = (self.tof_valid and self.tof_filtered_mm is not None
+                    and 0 <= int(self.tof_filtered_mm) < threshold)
+        if us_near:
+            scene = 'SOLID' if tof_near else 'TRANSPARENT'
+        else:
+            scene = 'SMOKE' if tof_near else 'CLEAR'
+        if scene == self.candidate:
+            self.streak = min(self.streak + 1, self.CONFIRM_N)
+        else:
+            self.candidate = scene
+            self.streak = 1
+        if self.streak >= self.CONFIRM_N:
+            self.confirmed = self.candidate
+        self.stopped = self.confirmed in ('SOLID', 'TRANSPARENT')
+
 
 class SensorChart(FigureCanvasQTAgg):
     """Plot a history snapshot with derived and raw values on separate axes."""
@@ -147,6 +207,9 @@ class UiWidget(QWidget):
         self.motor_sliders = {}
         self.motor_position_entries = {}
         self.motor_send_buttons = {}
+        self.smoke_fusion = SmokeFusion()
+        self._slot_last_rising_time = None
+        self._slot_rpm_ema = None
         self._history_lock = Lock()
 
         # region Values
@@ -163,7 +226,7 @@ class UiWidget(QWidget):
             SensorType.POTENTIOMETER: self._history(), # [timestamp, rawValue, percent]
             SensorType.THERMISTOR: self._history(), # [timestamp, raw ADC, celsius]
             SensorType.ULTRASONIC: self._history(), # [timestamp, raw ADC, meters]
-            SensorType.SLOT: self._history(), # [timestamp, isBlocked]
+            SensorType.SLOT: self._history(), # [timestamp, RPM (7-period EMA)]
             SensorType.TOF: self._history(), # [timestamp, millimeters, meters]
             MotorType.SERVO: self._history(), # [timestamp, position]
             MotorType.STEPPER: self._history(), # [timestamp, position]
@@ -226,7 +289,7 @@ class UiWidget(QWidget):
             'Time-of-Flight',
         ], sensors=True), 1)
         layout.addWidget(self._column([
-            'Servo', 'Stepper', 'DC', 'Smoke detection placeholder',
+            'Servo', 'Stepper', 'DC', 'Smoke detection',
         ]), 1)
         self.sensor_history_updated.connect(self._refresh_sensor_chart, Qt.QueuedConnection)
         # endregion UI Setup
@@ -303,6 +366,11 @@ class UiWidget(QWidget):
 
     def _refresh_sensor_chart(self, sensor, history):
         self.sensor_charts[sensor].set_history(history)
+        if sensor in (SensorType.ULTRASONIC, SensorType.TOF):
+            self.smoke_fusion.update(sensor, history[-1][1])
+            self.smoke_label.setText(
+                'SMOKE DETECTED' if self.smoke_fusion.confirmed == 'SMOKE'
+                else 'NO SMOKE DETECTED')
 
     def pot_callback(self, msg: Int32):
         raw = msg.data
@@ -321,8 +389,22 @@ class UiWidget(QWidget):
         self._record(SensorType.ULTRASONIC, raw, ultrasonic_meters(raw))
 
     def slot_callback(self, msg: Bool):
+        previous = self.sensor_values[SensorType.SLOT]
+        now = time.monotonic()
+        # Only an observed Clear -> Blocked transition counts as a rising edge.
+        if msg.data and previous is False:
+            if self._slot_last_rising_time is not None:
+                period = now - self._slot_last_rising_time
+                if period > 0:
+                    rpm = 60.0 / period
+                    self._slot_rpm_ema = (
+                        rpm if self._slot_rpm_ema is None else
+                        SLOT_RPM_EMA_ALPHA * rpm
+                        + (1.0 - SLOT_RPM_EMA_ALPHA) * self._slot_rpm_ema)
+            self._slot_last_rising_time = now
         self.sensor_values[SensorType.SLOT] = msg.data
-        self._record(SensorType.SLOT, msg.data)
+        # Hold the estimate between edges; repeated states must not advance the EMA.
+        self._record(SensorType.SLOT, self._slot_rpm_ema or 0.0)
 
     def tof_callback(self, msg: Int32):
         millimeters = msg.data
@@ -431,13 +513,14 @@ class UiWidget(QWidget):
             contents.setSpacing(12)
             if sensors:
                 self._sensor_contents(contents, text)
-            elif text == 'Smoke detection placeholder':
-                label = QLabel(text)
-                label.setAlignment(Qt.AlignCenter)
-                contents.addWidget(label)
+            elif text == 'Smoke detection':
+                self.smoke_label = QLabel('NO SMOKE DETECTED')
+                self.smoke_label.setAlignment(Qt.AlignCenter)
+                self.smoke_label.setAccessibleName('Smoke detection status')
+                contents.addWidget(self.smoke_label)
             else:
                 self._motor_contents(contents, text)
-            layout.addWidget(cell, 1 if text == 'Smoke detection placeholder' else 2)
+            layout.addWidget(cell, 1 if text == 'Smoke detection' else 2)
         return column
 
     def _sensor_contents(self, layout, name):
@@ -502,11 +585,10 @@ class UiWidget(QWidget):
             SensorType.POTENTIOMETER: ('Position (%)', 'Raw ADC'),
             SensorType.THERMISTOR: ('Temperature (°C)', 'Raw ADC'),
             SensorType.ULTRASONIC: ('Distance (m)', 'Raw ADC'),
-            SensorType.SLOT: ('Slot state', None),
+            SensorType.SLOT: ('RPM (7-period EMA)', None),
             SensorType.TOF: ('Distance (m)', 'Raw (mm)'),
         }[sensor]
-        self.sensor_charts[sensor] = SensorChart(
-            *chart, binary=sensor == SensorType.SLOT)
+        self.sensor_charts[sensor] = SensorChart(*chart)
         self.sensor_charts[sensor].setAccessibleName(f'{name} history graph')
         layout.addWidget(self.sensor_charts[sensor], 3)
 
