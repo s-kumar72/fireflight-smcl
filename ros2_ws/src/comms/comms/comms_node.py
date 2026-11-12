@@ -3,7 +3,7 @@
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool, Int32, UInt8, String
+from std_msgs.msg import Int32, UInt8, String
 import serial
 from comms.types import SensorType, MotorType
 import time
@@ -47,7 +47,7 @@ class CommsNode(Node):
         self.pot_pub = self.create_publisher(Int32, 'potentiometer', 10) # 0-1023
         self.thermistor_pub = self.create_publisher(Int32, 'thermistor', 10) # 0-1023
         self.ultrasonic_pub = self.create_publisher(Int32, 'ultrasonic', 10) # 0-4000
-        self.slot_pub = self.create_publisher(Bool, 'slot', 10) # True if slot is blocked
+        self.slot_pub = self.create_publisher(Int32, 'slot', 10) # RPM, 0-4095
         self.tof_pub = self.create_publisher(Int32, 'tof', 10) # 0~4000
         self.dc_encoder_pub = self.create_publisher(Int32, 'dc_encoder', 10) # 0-4096, mapping tbd
 
@@ -63,7 +63,7 @@ class CommsNode(Node):
             SensorType.POTENTIOMETER: 0,
             SensorType.THERMISTOR: 0,
             SensorType.ULTRASONIC: 0,
-            SensorType.SLOT: False,
+            SensorType.SLOT: 0,
             SensorType.TOF: 0,
             SensorType.DC_ENCODER: 0,
         }
@@ -138,8 +138,8 @@ class CommsNode(Node):
         self.ultrasonic_pub.publish(Int32(data=self.sensor_values[SensorType.ULTRASONIC]))
     
     def updateSlotValue(self, value: str):
-        self.sensor_values[SensorType.SLOT] = bool(int(value))
-        self.slot_pub.publish(Bool(data=self.sensor_values[SensorType.SLOT]))
+        self.sensor_values[SensorType.SLOT] = max(0, min(4095, int(value)))
+        self.slot_pub.publish(Int32(data=self.sensor_values[SensorType.SLOT]))
     
     def updateTofValue(self, value: str):
         self.sensor_values[SensorType.TOF] = int(value)

@@ -13,7 +13,7 @@ from python_qt_binding.QtWidgets import (
     QSlider, QVBoxLayout, QWidget,
 )
 from rqt_gui_py.plugin import Plugin
-from std_msgs.msg import String, Int32, Bool
+from std_msgs.msg import String, Int32
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
@@ -24,9 +24,7 @@ EST_DATA_FREQ = 5.0  # Hz
 EST_DATA_PERIOD = 1.0 / EST_DATA_FREQ
 HISTORY_NOMINAL_LEN = round(60 * EST_DATA_FREQ)  # One minute of samples.
 MIN_CMD_DELAY = 0.2 # Seconds before sending a new command to the motor
-SLOT_RPM_EMA_PERIOD = 7
-SLOT_RPM_EMA_ALPHA = 2.0 / (SLOT_RPM_EMA_PERIOD + 1)
-SLOT_RPM_TIMEOUT = 3.0  # Seconds without a rising edge before reporting stopped.
+SLOT_RPM_MAX = 4095
 
 ADC_FULL_SCALE = 1023.0
 
@@ -203,8 +201,6 @@ class UiWidget(QWidget):
         self.motor_position_entries = {}
         self.motor_send_buttons = {}
         self.smoke_fusion = SmokeFusion()
-        self._slot_last_rising_time = None
-        self._slot_rpm_ema = None
         self._history_lock = Lock()
 
         # region Values
@@ -221,7 +217,7 @@ class UiWidget(QWidget):
             SensorType.POTENTIOMETER: self._history(), # [timestamp, rawValue, percent]
             SensorType.THERMISTOR: self._history(), # [timestamp, raw ADC, celsius]
             SensorType.ULTRASONIC: self._history(), # [timestamp, raw ADC, meters]
-            SensorType.SLOT: self._history(), # [timestamp, RPM (7-period EMA)]
+            SensorType.SLOT: self._history(), # [timestamp, RPM from Arduino]
             SensorType.TOF: self._history(), # [timestamp, millimeters, meters]
             MotorType.SERVO: self._history(), # [timestamp, position]
             MotorType.STEPPER: self._history(), # [timestamp, position]
@@ -243,7 +239,7 @@ class UiWidget(QWidget):
             self.pot_sub = node.create_subscription(Int32, 'potentiometer', self.pot_callback, 10)
             self.thermistor_sub = node.create_subscription(Int32, 'thermistor', self.thermistor_callback, 10)
             self.ultrasonic_sub = node.create_subscription(Int32, 'ultrasonic', self.ultrasonic_callback, 10)
-            self.slot_sub = node.create_subscription(Bool, 'slot', self.slot_callback, 10)
+            self.slot_sub = node.create_subscription(Int32, 'slot', self.slot_callback, 10)
             self.tof_sub = node.create_subscription(Int32, 'tof', self.tof_callback, 10)
 
             self.dc_encoder_sub = node.create_subscription(Int32, 'dc_encoder', self.dc_encoder_callback, 10)
@@ -383,32 +379,10 @@ class UiWidget(QWidget):
         self.sensor_values[SensorType.ULTRASONIC] = raw
         self._record(SensorType.ULTRASONIC, raw, ultrasonic_meters(raw))
 
-    def _expire_slot_rpm(self, now):
-        if (self._slot_last_rising_time is None or
-                now - self._slot_last_rising_time < SLOT_RPM_TIMEOUT):
-            return False
-        self._slot_last_rising_time = None
-        self._slot_rpm_ema = None
-        return True
-
-    def slot_callback(self, msg: Bool):
-        previous = self.sensor_values[SensorType.SLOT]
-        now = time.monotonic()
-        self._expire_slot_rpm(now)
-        # Only an observed Clear -> Blocked transition counts as a rising edge.
-        if msg.data and previous is False:
-            if self._slot_last_rising_time is not None:
-                period = now - self._slot_last_rising_time
-                if period > 0:
-                    rpm = 60.0 / period
-                    self._slot_rpm_ema = (
-                        rpm if self._slot_rpm_ema is None else
-                        SLOT_RPM_EMA_ALPHA * rpm
-                        + (1.0 - SLOT_RPM_EMA_ALPHA) * self._slot_rpm_ema)
-            self._slot_last_rising_time = now
-        self.sensor_values[SensorType.SLOT] = msg.data
-        # Hold between edges until the timeout; repeated states don't advance the EMA.
-        self._record(SensorType.SLOT, self._slot_rpm_ema or 0.0)
+    def slot_callback(self, msg: Int32):
+        rpm = max(0, min(SLOT_RPM_MAX, msg.data))
+        self.sensor_values[SensorType.SLOT] = rpm
+        self._record(SensorType.SLOT, rpm)
 
     def tof_callback(self, msg: Int32):
         millimeters = msg.data
@@ -457,13 +431,9 @@ class UiWidget(QWidget):
                                         f'{meters:.2f} m', ULTRASONIC_MAX_METERS)
 
     def update_slot_ui(self):
-        # Also expire when slot messages stop arriving altogether.
-        if self._expire_slot_rpm(time.monotonic()):
-            self._record(SensorType.SLOT, 0.0)
-        blocked = self.sensor_values[SensorType.SLOT]
-        if blocked is not None:
-            self.sensor_labels[SensorType.SLOT].setText(
-                'STATE: Blocked' if blocked else 'STATE: Clear')
+        rpm = self.sensor_values[SensorType.SLOT]
+        if rpm is not None:
+            self.sensor_labels[SensorType.SLOT].setText(f'RPM: {rpm}')
 
     def update_tof_ui(self):
         millimeters = self.sensor_values[SensorType.TOF]
@@ -552,11 +522,11 @@ class UiWidget(QWidget):
         controls_layout.addStretch(1)
 
         if name == 'Slot':
-            state = QLabel('STATE: —')
-            state.setProperty('valuePlaceholder', True)
-            state.setAlignment(Qt.AlignCenter)
-            controls_layout.addWidget(state)
-            self.sensor_labels[sensor] = state
+            value = QLabel('RPM: —')
+            value.setProperty('valuePlaceholder', True)
+            value.setAlignment(Qt.AlignCenter)
+            controls_layout.addWidget(value)
+            self.sensor_labels[sensor] = value
         else:
             value = QLabel('Value: —')
             value.setProperty('valuePlaceholder', True)
@@ -592,7 +562,7 @@ class UiWidget(QWidget):
             SensorType.POTENTIOMETER: ('Position (%)', 'Raw ADC'),
             SensorType.THERMISTOR: ('Temperature (°C)', 'Raw ADC'),
             SensorType.ULTRASONIC: ('Distance (m)', 'Raw ADC'),
-            SensorType.SLOT: ('RPM (7-period EMA)', None),
+            SensorType.SLOT: ('RPM', None),
             SensorType.TOF: ('Distance (m)', 'Raw (mm)'),
         }[sensor]
         self.sensor_charts[sensor] = SensorChart(*chart)

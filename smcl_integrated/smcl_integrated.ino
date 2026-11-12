@@ -14,6 +14,7 @@
   Motor commands are ignored in sensor mode. Switching modes cancels pending
   stepper travel and stops the DC motor; the servo holds until its next target.
   Sensor requests work in BOTH modes: REQ:POT/THERM/ULTR/SLOT/TOF/DCE.
+  SLOT reports integer RPM, 0..4095, using a local three-blade counter.
   DCE is encoder shaft angle wrapped to 0..4095 per revolution; TOF is -1
   when unavailable/invalid. Only protocol replies are written to Serial.
 
@@ -28,6 +29,58 @@
 #include <math.h>
 #include <string.h>
 
+// Local slot RPM counter, based on the original smcl implementation.
+int slotReading();
+#define SLOT_SENSOR_PIN 12
+
+const unsigned long SLOT_WINDOW_MS = 1000;
+
+int slotPrevState = 0;                
+unsigned long slotCount = 0;
+unsigned long slotWindowStartMs = 0;  
+int slotRPM = 0;       
+const int SLOT_BLADES = 3; 
+
+void slotSetup() {
+  pinMode(SLOT_SENSOR_PIN, INPUT_PULLUP);
+  slotPrevState = slotReading();  // avoid a false count on the first loop
+  slotCount = 0;
+  slotRPM = 0;
+  slotWindowStartMs = millis();
+}
+
+int slotReading() {
+  if (digitalRead(SLOT_SENSOR_PIN) == HIGH) {
+    return 1; // blocked means 1 (detected a reading)
+  } else {
+    return 0; // open means that its not reading anything 0
+  }
+}
+
+// call every loop() 
+void slotUpdate() {
+  int current = slotReading();
+
+  if (slotPrevState == 0 && current == 1) {
+    slotCount++;
+  }
+  slotPrevState = current;
+
+  unsigned long now = millis();
+  unsigned long elapsed = now - slotWindowStartMs;
+  if (elapsed >= SLOT_WINDOW_MS) {
+    // Three rising edges per revolution; account for the actual window length.
+    float rpm = slotCount * 60000.0f / (SLOT_BLADES * (float)elapsed);
+    slotRPM = (int)lround(constrain(rpm, 0.0f, 4095.0f));
+    slotCount = 0;
+    slotWindowStartMs = now;
+  }
+}
+
+int slotHandleRequest() {
+  return slotRPM;
+}
+
 const uint8_t BUTTON_PIN = 13;
 const unsigned long DEBOUNCE_MS = 30;
 enum ControlMode { SENSOR_CONTROL, UI_CONTROL };
@@ -39,7 +92,7 @@ unsigned long buttonChangedMs = 0;
 const uint8_t POT_PIN = A0, SONAR_PIN = A1, THERM_PIN = A3;
 const uint8_t ENCODER_A = 2, ENCODER_B = 3;
 const uint8_t MOTOR_PWM = 6, MOTOR_IN1 = 7, MOTOR_IN2 = 8;
-const uint8_t SERVO_PIN = 9, STEP_PIN = 10, DIR_PIN = 11, SLOT_PIN = 12;
+const uint8_t SERVO_PIN = 9, STEP_PIN = 10, DIR_PIN = 11;
 const float ENCODER_CPR = 420.0f;
 const float DEG_PER_STEP = 360.0f / (200L * 8);
 const unsigned long STEP_INTERVAL_US = 1000;
@@ -261,7 +314,7 @@ void handleRequest(const char *cmd) {
   if (strcmp(cmd, "REQ:POT") == 0) reply("POT:", potRaw);
   else if (strcmp(cmd, "REQ:THERM") == 0) reply("TRM:", thermRaw);
   else if (strcmp(cmd, "REQ:ULTR") == 0) reply("ULT:", lround(sonarFilteredMm));
-  else if (strcmp(cmd, "REQ:SLOT") == 0) reply("SLT:", digitalRead(SLOT_PIN) == HIGH ? 1 : 0);
+  else if (strcmp(cmd, "REQ:SLOT") == 0) reply("SLT:", slotHandleRequest());
   else if (strcmp(cmd, "REQ:TOF") == 0) reply("TOF:", tofValid ? tofRawMm : -1);
   else if (strcmp(cmd, "REQ:DCE") == 0) {
     long wrapped = readEncoder() % (long)ENCODER_CPR;
@@ -319,7 +372,7 @@ void setup() {
   buttonRaw = buttonStable = digitalRead(BUTTON_PIN);
   buttonChangedMs = millis();
   pinMode(SONAR_PIN, INPUT);
-  pinMode(SLOT_PIN, INPUT_PULLUP);
+  slotSetup();
   pinMode(ENCODER_A, INPUT_PULLUP);
   pinMode(ENCODER_B, INPUT_PULLUP);
   pinMode(MOTOR_PWM, OUTPUT);
@@ -352,6 +405,7 @@ void setup() {
 
 void loop() {
   buttonUpdate();
+  slotUpdate();
   serialUpdate();
   sensorsUpdate();
   sensorControlUpdate();
