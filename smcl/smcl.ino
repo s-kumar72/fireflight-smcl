@@ -18,7 +18,7 @@ void handleRequest(const char* cmd){
   } 
   else if (strcmp(cmd, "REQ:SLOT") == 0) {
     Serial.print("SLT: ");
-    Serial.print(slotHandleRequest());
+    Serial.print(slotReading());
     Serial.print('\n');
   }
 }
