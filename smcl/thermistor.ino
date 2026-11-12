@@ -3,7 +3,7 @@
 const float R_FIXED   = 10000.0;
 const float R0        = 10000.0;
 const float T0_K      = 298.15;
-const float BETA      = 3950.0;
+const float BETA      = 3220.0;
 const int   N_SAMPLES = 16;
 
 int thermReadAdc() {

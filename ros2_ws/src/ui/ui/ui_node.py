@@ -34,7 +34,7 @@ ADC_FULL_SCALE = 1023.0
 THERMISTOR_R25 = 10000.0
 THERMISTOR_SERIES = 10000.0
 THERMISTOR_T0_K = 298.15
-THERMISTOR_BETA = 3950.0
+THERMISTOR_BETA = 3220.0
 
 # LV-MaxSonar-EZ analog output is (Vcc/512) volts per inch. A 10-bit ADC
 # using that same Vcc therefore has 1024/512 = 2 counts per inch.
