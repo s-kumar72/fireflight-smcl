@@ -7,7 +7,7 @@
   SENSOR_CONTROL (initial mode) / UI_CONTROL. No delays in the main loop.
   Sensor mode: pot -> stepper, thermistor -> servo, ultrasonic -> DC RPM.
   UI mode (115200 baud, newline terminated):
-    SER:0..180             absolute servo angle in degrees
+    SER:0..90              absolute servo angle in degrees
     STP:+:0..32767         relative stepper move in degrees (also STP:-:...)
     DCM:P:+:0..32767       absolute DC shaft angle from boot (also -)
     DCM:V:+:0..60          signed DC shaft RPM (also -); V with 0 stops
@@ -35,11 +35,11 @@ int slotReading();
 
 const unsigned long SLOT_WINDOW_MS = 1000;
 
-int slotPrevState = 0;                
+int slotPrevState = 0;
 unsigned long slotCount = 0;
-unsigned long slotWindowStartMs = 0;  
-int slotRPM = 0;       
-const int SLOT_BLADES = 3; 
+unsigned long slotWindowStartMs = 0;
+int slotRPM = 0;
+const int SLOT_BLADES = 3;
 
 void slotSetup() {
   pinMode(SLOT_SENSOR_PIN, INPUT_PULLUP);
@@ -57,7 +57,7 @@ int slotReading() {
   }
 }
 
-// call every loop() 
+// call every loop()
 void slotUpdate() {
   int current = slotReading();
 
@@ -93,6 +93,7 @@ const uint8_t POT_PIN = A0, SONAR_PIN = A1, THERM_PIN = A3;
 const uint8_t ENCODER_A = 2, ENCODER_B = 3;
 const uint8_t MOTOR_PWM = 6, MOTOR_IN1 = 7, MOTOR_IN2 = 8;
 const uint8_t SERVO_PIN = 9, STEP_PIN = 10, DIR_PIN = 11;
+const float SERVO_MAX_DEG = 90.0f;
 const float ENCODER_CPR = 420.0f;
 const float DEG_PER_STEP = 360.0f / (200L * 8);
 const unsigned long STEP_INTERVAL_US = 1000;
@@ -191,7 +192,8 @@ void buttonUpdate() {
 }
 
 void servoSetDeg(float degrees) {
-  servoDeg = constrain(degrees, 0.0f, 180.0f);
+  servoDeg = constrain(degrees, 0.0f, SERVO_MAX_DEG);
+  // Keep the physical 0..180 degree calibration; 90 degrees is 1500 us.
   servo.writeMicroseconds(1000 + (int)(servoDeg * 1000.0f / 180.0f));
 }
 
@@ -244,7 +246,8 @@ void sensorControlUpdate() {
   dcMode = DC_VELOCITY;
   if (millis() - lastServoMs >= 100) {
     lastServoMs = millis();
-    float target = constrain((thermCelsius(thermRaw) - 20.0f) * 12.0f, 0.0f, 180.0f);
+    float target = constrain((thermCelsius(thermRaw) - 20.0f) * (SERVO_MAX_DEG / 15.0f),
+                             0.0f, SERVO_MAX_DEG);
     if (fabs(target - servoDeg) >= 2.0f) servoSetDeg(target);
   }
 }
@@ -323,7 +326,7 @@ void handleRequest(const char *cmd) {
   } else if (controlMode == UI_CONTROL) {
     unsigned int value;
     size_t length = strlen(cmd);
-    if (strncmp(cmd, "SER:", 4) == 0 && parseValue(cmd + 4, 180, value)) {
+    if (strncmp(cmd, "SER:", 4) == 0 && parseValue(cmd + 4, (unsigned int)SERVO_MAX_DEG, value)) {
       servoSetDeg(value);
     } else if (length >= 7 && strncmp(cmd, "STP:", 4) == 0 &&
                (cmd[4] == '+' || cmd[4] == '-') && cmd[5] == ':' &&
