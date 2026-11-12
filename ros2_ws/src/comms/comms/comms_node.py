@@ -3,7 +3,7 @@
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Int32, UInt8, String
+from std_msgs.msg import Float32, Int32, UInt8, String
 import serial
 from comms.types import SensorType, MotorType
 import time
@@ -20,6 +20,7 @@ REQUEST_MSGS = {
     SensorType.SLOT: b'REQ:SLOT\n',
     SensorType.TOF: b'REQ:TOF\n',
     SensorType.DC_ENCODER: b'REQ:DCE\n',
+    SensorType.DC_RPM: b'REQ:DCR\n',
 }
 
 RESPONSE_HEADERS = {
@@ -29,6 +30,7 @@ RESPONSE_HEADERS = {
     'SLT': SensorType.SLOT,
     'TOF': SensorType.TOF,
     'DCE': SensorType.DC_ENCODER,
+    'DCR': SensorType.DC_RPM,
 }
 
 
@@ -49,7 +51,8 @@ class CommsNode(Node):
         self.ultrasonic_pub = self.create_publisher(Int32, 'ultrasonic', 10) # 0-4000
         self.slot_pub = self.create_publisher(Int32, 'slot', 10) # RPM, 0-4095
         self.tof_pub = self.create_publisher(Int32, 'tof', 10) # 0~4000
-        self.dc_encoder_pub = self.create_publisher(Int32, 'dc_encoder', 10) # 0-4096, mapping tbd
+        self.dc_encoder_pub = self.create_publisher(Int32, 'dc_encoder', 10) # Signed counts, 420/rev
+        self.dc_rpm_pub = self.create_publisher(Float32, 'dc_rpm', 10)
 
         # Was thinking don't request from UI, just request here repeatedly
         # self.read_request_sub = self.create_subscription(
@@ -66,6 +69,7 @@ class CommsNode(Node):
             SensorType.SLOT: 0,
             SensorType.TOF: 0,
             SensorType.DC_ENCODER: 0,
+            SensorType.DC_RPM: 0.0,
         }
         
         try:
@@ -82,6 +86,8 @@ class CommsNode(Node):
     # STEPPER goes STP:<DIR>:<ANGLE>\n WHERE DIR IS "+" OR "-" AND ANGLE IS STR(INT) [0, 32767] (degrees)
     # DC goes DCM:<MODE>:<DIR>:<VALUE>\n WHERE MODE IS "P" for POSITION or "V" for VELOCITY
     # AND DIR IS "+" OR "-" AND FOR RPM is [0, 60] and for POSITION is [0, 32767] (degrees)
+    # Each DC command resets the encoder origin; POSITION is a relative rotation.
+    # DCE reports signed counts since that reset; DCR reports measured RPM.
 
     def motorCommandCallback(self, msg: String):
         self.serial.write(msg.data.encode('utf-8'))
@@ -113,6 +119,8 @@ class CommsNode(Node):
                     self.updateTofValue(msgSplit[1])
                 case SensorType.DC_ENCODER:
                     self.updateDcEncoderValue(msgSplit[1])
+                case SensorType.DC_RPM:
+                    self.updateDcRpmValue(msgSplit[1])
         else:
             self.get_logger().warning(f'Response not recognized: {msg}')        
 
@@ -148,6 +156,10 @@ class CommsNode(Node):
     def updateDcEncoderValue(self, value: str):
         self.sensor_values[SensorType.DC_ENCODER] = int(value)
         self.dc_encoder_pub.publish(Int32(data=self.sensor_values[SensorType.DC_ENCODER]))
+
+    def updateDcRpmValue(self, value: str):
+        self.sensor_values[SensorType.DC_RPM] = float(value)
+        self.dc_rpm_pub.publish(Float32(data=self.sensor_values[SensorType.DC_RPM]))
     # endregion Sensor Value Update Functions
 
 def main(args=None):

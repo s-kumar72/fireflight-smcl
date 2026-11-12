@@ -10,6 +10,7 @@ class SensorType(Enum):
     SLOT = 3
     TOF = 4
     DC_ENCODER = 5
+    DC_RPM = 6
 
 
 class MotorType(Enum):

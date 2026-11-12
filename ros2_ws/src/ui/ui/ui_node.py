@@ -13,7 +13,7 @@ from python_qt_binding.QtWidgets import (
     QSlider, QVBoxLayout, QWidget,
 )
 from rqt_gui_py.plugin import Plugin
-from std_msgs.msg import String, Int32
+from std_msgs.msg import String, Int32, Float32
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
@@ -25,6 +25,7 @@ EST_DATA_PERIOD = 1.0 / EST_DATA_FREQ
 HISTORY_NOMINAL_LEN = round(60 * EST_DATA_FREQ)  # One minute of samples.
 MIN_CMD_DELAY = 0.2 # Seconds before sending a new command to the motor
 SLOT_RPM_MAX = 4095
+DC_ENCODER_CPR = 420.0  # Matches smcl_integrated's rising-edge encoder counter.
 
 ADC_FULL_SCALE = 1023.0
 
@@ -182,6 +183,35 @@ class SensorChart(FigureCanvasQTAgg):
         self.draw_idle()
 
 
+class DcMotorChart(SensorChart):
+    """Measured shaft position/RPM, with the current command on each axis."""
+
+    def __init__(self):
+        super().__init__('Position (°)', 'RPM')
+        self.raw_line.set_linestyle('-')
+        self.derived_line.set_label('Position')
+        self.raw_line.set_label('RPM')
+        self.position_setpoint = self.axes.axhline(
+            0, color='tab:blue', linestyle=':', label='Position target')
+        self.rpm_setpoint = self.raw_axes.axhline(
+            0, color='tab:orange', linestyle=':', label='RPM target')
+        self.axes.legend(handles=[self.derived_line, self.position_setpoint,
+                                  self.raw_line, self.rpm_setpoint],
+                         fontsize=5, loc='upper left', ncol=2)
+
+    def set_setpoints(self, position, rpm):
+        self.position_setpoint.set_ydata([position, position])
+        self.rpm_setpoint.set_ydata([rpm, rpm])
+        for axes in (self.axes, self.raw_axes):
+            axes.relim()
+            axes.autoscale_view(scalex=False)
+        self.draw_idle()
+
+    def set_history(self, history):
+        # SensorChart expects [time, right-axis value, left-axis value].
+        super().set_history([(stamp, rpm, position) for stamp, position, rpm in history])
+
+
 class UiWidget(QWidget):
     """Display sensor controls, history graphs, and motor cells."""
 
@@ -201,6 +231,7 @@ class UiWidget(QWidget):
         self.motor_position_entries = {}
         self.motor_send_buttons = {}
         self.smoke_fusion = SmokeFusion()
+        self._dc_position_deg = 0.0
         self._history_lock = Lock()
 
         # region Values
@@ -211,6 +242,7 @@ class UiWidget(QWidget):
             SensorType.SLOT: None,
             SensorType.TOF: None,
             SensorType.DC_ENCODER: 0,
+            SensorType.DC_RPM: 0.0,
         }
 
         self.data_history = {
@@ -221,7 +253,7 @@ class UiWidget(QWidget):
             SensorType.TOF: self._history(), # [timestamp, millimeters, meters]
             MotorType.SERVO: self._history(), # [timestamp, position]
             MotorType.STEPPER: self._history(), # [timestamp, position]
-            SensorType.DC_ENCODER: self._history(), # [timestamp, position]
+            SensorType.DC_ENCODER: self._history(), # [timestamp, position degrees, RPM]
         }
 
         self.last_motor_command_times = {
@@ -243,11 +275,13 @@ class UiWidget(QWidget):
             self.tof_sub = node.create_subscription(Int32, 'tof', self.tof_callback, 10)
 
             self.dc_encoder_sub = node.create_subscription(Int32, 'dc_encoder', self.dc_encoder_callback, 10)
+            self.dc_rpm_sub = node.create_subscription(Float32, 'dc_rpm', self.dc_rpm_callback, 10)
             # Stepper and servo are technically open-loop, so no subs for these
             # endregion Publishers and Subscribers
 
             self._subscriptions = [self.pot_sub, self.thermistor_sub,
-                self.ultrasonic_sub, self.slot_sub, self.tof_sub, self.dc_encoder_sub]
+                self.ultrasonic_sub, self.slot_sub, self.tof_sub, self.dc_encoder_sub,
+                self.dc_rpm_sub]
 
         # region UI Setup
         self.setObjectName('FireFlightUi')
@@ -302,6 +336,8 @@ class UiWidget(QWidget):
             maximum = 60 if motor_type == MotorType.DC and mode == 'V' else 32767
             if abs(value) > maximum or mode not in ('P', 'V'):
                 return False
+            if motor_type == MotorType.DC and mode == 'V' and value < 0:
+                return False
             direction = '+' if value >= 0 else '-'
             if motor_type == MotorType.STEPPER:
                 command = f'STP:{direction}:{abs(value)}\n'
@@ -317,6 +353,12 @@ class UiWidget(QWidget):
         msg.data = command
         self.motor_command_pub.publish(msg)
         self.last_motor_command_times[motor_type] = now
+        if motor_type == MotorType.DC:
+            self.sensor_charts[SensorType.DC_ENCODER].set_setpoints(
+                value if mode == 'P' else 0, value if mode == 'V' else 0)
+            self._dc_position_deg = 0.0
+            self.sensor_values[SensorType.DC_ENCODER] = 0
+            self._record(SensorType.DC_ENCODER, 0.0, self.sensor_values[SensorType.DC_RPM])
         return True
 
     def _send_motor_position(self, motor):
@@ -390,9 +432,14 @@ class UiWidget(QWidget):
         self._record(SensorType.TOF, millimeters, tof_meters(millimeters))
 
     def dc_encoder_callback(self, msg: Int32):
-        position = msg.data
-        self.sensor_values[SensorType.DC_ENCODER] = position
-        self._record(SensorType.DC_ENCODER, position)
+        self.sensor_values[SensorType.DC_ENCODER] = msg.data
+        self._dc_position_deg = msg.data * 360.0 / DC_ENCODER_CPR
+        self._record(SensorType.DC_ENCODER, self._dc_position_deg,
+                     self.sensor_values[SensorType.DC_RPM])
+
+    def dc_rpm_callback(self, msg: Float32):
+        self.sensor_values[SensorType.DC_RPM] = msg.data
+        self._record(SensorType.DC_ENCODER, self._dc_position_deg, msg.data)
 
     # endregion Subscriber Callbacks
 
@@ -590,7 +637,7 @@ class UiWidget(QWidget):
             position_row.addWidget(position)
             entry = QLineEdit()
             entry.setAccessibleName(f'{name} position command')
-            entry.setPlaceholderText('Position (°)')
+            entry.setPlaceholderText('Relative rotation (°)' if name == 'DC' else 'Position (°)')
             entry.setValidator(QIntValidator(-32767, 32767, entry))
             entry.setMinimumWidth(0)
             position_row.addWidget(entry, 1)
@@ -619,7 +666,7 @@ class UiWidget(QWidget):
 
         slider = QSlider(Qt.Horizontal)
         slider.setAccessibleName(f'{name} slider')
-        minimum, maximum = (0, 180) if name == 'Servo' else (-60, 60)
+        minimum, maximum = (0, 180) if name == 'Servo' else (0, 60)
         slider.setRange(minimum, maximum)
         slider.setValue(0)
         self.motor_sliders[motor] = slider
@@ -627,7 +674,7 @@ class UiWidget(QWidget):
         slider.sliderReleased.connect(lambda: self._send_motor_slider(motor, force=True))
         contents.addWidget(slider)
         endpoints = QHBoxLayout()
-        bounds = ('0°', '180°') if name == 'Servo' else ('−60 RPM', '+60 RPM')
+        bounds = ('0°', '180°') if name == 'Servo' else ('0 RPM', '60 RPM')
         for text, alignment in zip(bounds, (Qt.AlignLeft, Qt.AlignRight)):
             endpoint = QLabel(text)
             endpoint.setAlignment(alignment)
@@ -639,8 +686,8 @@ class UiWidget(QWidget):
 
         layout.addWidget(controls, 1)
         if name == 'DC':
-            chart = SensorChart(raw_label='Encoder position (counts)')
-            chart.setAccessibleName('DC encoder history graph')
+            chart = DcMotorChart()
+            chart.setAccessibleName('DC position and RPM history graph')
             self.sensor_charts[SensorType.DC_ENCODER] = chart
             layout.addWidget(chart, 1)
     # endregion UI Functions

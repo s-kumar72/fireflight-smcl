@@ -4,18 +4,21 @@
   Libraries: Servo, SparkFun VL53L1X 4m Laser Distance Sensor.
 
   D13 -> push-button -> GND, INPUT_PULLUP. A debounced falling edge toggles
+  modes; the Uno uses a pin-change interrupt to retain presses between loop polls.
   SENSOR_CONTROL (initial mode) / UI_CONTROL. No delays in the main loop.
   Sensor mode: pot -> stepper, thermistor -> servo, ultrasonic -> DC RPM.
   UI mode (115200 baud, newline terminated):
     SER:0..180             absolute servo angle in degrees
     STP:+:0..32767         relative stepper move in degrees (also STP:-:...)
-    DCM:P:+:0..32767       absolute DC shaft angle from boot (also -)
+    DCM:P:+:0..32767       relative DC shaft rotation in degrees (also -)
     DCM:V:+:0..60          signed DC shaft RPM (also -); V with 0 stops
   Motor commands are ignored in sensor mode. Switching modes cancels pending
   stepper travel and stops the DC motor; the servo holds until its next target.
-  Sensor requests work in BOTH modes: REQ:POT/THERM/ULTR/SLOT/TOF/DCE.
+  Every accepted DC command zeros the encoder and starts a new relative origin.
+  Sensor requests work in BOTH modes: REQ:POT/THERM/ULTR/SLOT/TOF/DCE/DCR.
   SLOT reports integer RPM, 0..4095, using a local three-blade counter.
-  DCE is encoder shaft angle wrapped to 0..4095 per revolution; TOF is -1
+  DCE is signed encoder counts since the last DC command (420 per revolution).
+  DCR is measured shaft RPM; TOF is -1
   when unavailable/invalid. Only protocol replies are written to Serial.
 
   Wiring retained from smcl: A0 pot, A1 sonar, A3 thermistor, A4/A5 I2C,
@@ -28,6 +31,10 @@
 #include <SparkFun_VL53L1X.h>
 #include <math.h>
 #include <string.h>
+#if defined(__AVR_ATmega328P__)
+#include <avr/interrupt.h>
+#include <util/atomic.h>
+#endif
 
 // Local slot RPM counter, based on the original smcl implementation.
 int slotReading();
@@ -85,9 +92,10 @@ const uint8_t BUTTON_PIN = 13;
 const unsigned long DEBOUNCE_MS = 30;
 enum ControlMode { SENSOR_CONTROL, UI_CONTROL };
 ControlMode controlMode = SENSOR_CONTROL;
-int buttonRaw = HIGH;
-int buttonStable = HIGH;
-unsigned long buttonChangedMs = 0;
+volatile uint8_t buttonRaw = HIGH;
+volatile uint8_t buttonStable = HIGH;
+volatile unsigned long buttonChangedMs = 0;
+volatile uint8_t buttonPendingPresses = 0;
 
 const uint8_t POT_PIN = A0, SONAR_PIN = A1, THERM_PIN = A3;
 const uint8_t ENCODER_A = 2, ENCODER_B = 3;
@@ -136,7 +144,12 @@ uint8_t cmdLen = 0;
 bool cmdOverflow = false;
 
 void encoderISR() {
+#if defined(__AVR_ATmega328P__)
+  // Uno D3 is PD3: keep the frequent encoder interrupt as short as possible.
+  encoderCount += (PIND & _BV(PIND3)) ? 1 : -1;
+#else
   encoderCount += digitalRead(ENCODER_B) ? 1 : -1;
+#endif
 }
 
 long readEncoder() {
@@ -171,24 +184,52 @@ float computePID(PID &pid, float target, float measurement, float dt) {
   return pid.kp * (target - measurement) + pid.ki * pid.integral + pid.kd * derivative;
 }
 
-void buttonUpdate() {
-  unsigned long now = millis();
-  int reading = digitalRead(BUTTON_PIN);
+// Called with interrupts masked on the Uno. Only capture/debounce here;
+// motor control and Serial always run in loop(), never in an ISR.
+void buttonCapture(uint8_t reading, unsigned long now) {
+  // Accept the preceding level before recording this edge. This also retains
+  // a complete press/release that happened while loop() was busy elsewhere.
+  if (buttonRaw != buttonStable && now - buttonChangedMs >= DEBOUNCE_MS) {
+    uint8_t previous = buttonStable;
+    buttonStable = buttonRaw;
+    if (previous == HIGH && buttonStable == LOW && buttonPendingPresses < 255) {
+      ++buttonPendingPresses;
+    }
+  }
   if (reading != buttonRaw) {
     buttonRaw = reading;
     buttonChangedMs = now;
   }
-  if (buttonRaw == buttonStable || now - buttonChangedMs < DEBOUNCE_MS) return;
-  int previous = buttonStable;
-  buttonStable = buttonRaw;
-  if (previous != HIGH || buttonStable != LOW) return;
+}
 
-  controlMode = controlMode == SENSOR_CONTROL ? UI_CONTROL : SENSOR_CONTROL;
-  stepperTarget = stepperPos;
-  driveMotor(0);
-  targetRPM = 0;
-  dcMode = controlMode == UI_CONTROL ? DC_IDLE : DC_VELOCITY;
-  resetControllers();
+#if defined(__AVR_ATmega328P__)
+ISR(PCINT0_vect) {
+  buttonCapture((PINB & _BV(PINB5)) ? HIGH : LOW, millis());
+}
+#endif
+
+void buttonUpdate() {
+  uint8_t presses;
+#if defined(__AVR_ATmega328P__)
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    buttonCapture((PINB & _BV(PINB5)) ? HIGH : LOW, millis());
+    presses = buttonPendingPresses;
+    buttonPendingPresses = 0;
+  }
+#else
+  buttonCapture(digitalRead(BUTTON_PIN), millis());
+  presses = buttonPendingPresses;
+  buttonPendingPresses = 0;
+#endif
+  while (presses > 0) {
+    --presses;
+    controlMode = controlMode == SENSOR_CONTROL ? UI_CONTROL : SENSOR_CONTROL;
+    stepperTarget = stepperPos;
+    driveMotor(0);
+    targetRPM = 0;
+    dcMode = controlMode == UI_CONTROL ? DC_IDLE : DC_VELOCITY;
+    resetControllers();
+  }
 }
 
 void servoSetDeg(float degrees) {
@@ -319,9 +360,10 @@ void handleRequest(const char *cmd) {
   else if (strcmp(cmd, "REQ:SLOT") == 0) reply("SLT:", slotHandleRequest());
   else if (strcmp(cmd, "REQ:TOF") == 0) reply("TOF:", tofValid ? tofRawMm : -1);
   else if (strcmp(cmd, "REQ:DCE") == 0) {
-    long wrapped = readEncoder() % (long)ENCODER_CPR;
-    if (wrapped < 0) wrapped += (long)ENCODER_CPR;
-    reply("DCE:", wrapped * 4096L / (long)ENCODER_CPR);
+    reply("DCE:", readEncoder());
+  } else if (strcmp(cmd, "REQ:DCR") == 0) {
+    Serial.print("DCR:");
+    Serial.println(actualRPM, 2);
   } else if (controlMode == UI_CONTROL) {
     unsigned int value;
     size_t length = strlen(cmd);
@@ -338,11 +380,17 @@ void handleRequest(const char *cmd) {
                (cmd[6] == '+' || cmd[6] == '-') && cmd[7] == ':' &&
                parseValue(cmd + 8, cmd[4] == 'V' ? 60 : 32767, value)) {
       float signedValue = cmd[6] == '-' ? -(float)value : (float)value;
+      driveMotor(0);
+      noInterrupts();
+      encoderCount = 0;
+      interrupts();
       resetControllers();
       if (cmd[4] == 'P') {
         targetAngleDeg = signedValue;
+        targetRPM = 0;
         dcMode = DC_POSITION;
       } else {
+        targetAngleDeg = 0;
         targetRPM = signedValue;
         dcMode = DC_VELOCITY;
       }
@@ -373,6 +421,14 @@ void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   buttonRaw = buttonStable = digitalRead(BUTTON_PIN);
   buttonChangedMs = millis();
+  buttonPendingPresses = 0;
+#if defined(__AVR_ATmega328P__)
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    PCMSK0 |= _BV(PCINT5); // D13/PB5; D10..D12 output activity is not enabled.
+    PCIFR = _BV(PCIF0);
+    PCICR |= _BV(PCIE0);
+  }
+#endif
   pinMode(SONAR_PIN, INPUT);
   slotSetup();
   pinMode(ENCODER_A, INPUT_PULLUP);
