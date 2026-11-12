@@ -78,7 +78,7 @@ class CommsNode(Node):
             1.0 / SENSOR_REQ_FREQ, self.request_all_sensors)
     
     # MOTOR CONTROL PROTOCOL NOTE:
-    # SERVO goes SER:<ANGLE>\n WHERE ANGLE IS STR(INT) [0, 180] (degrees, may need to be remapped, check arduino code)
+    # SERVO goes SER:<ANGLE>\n WHERE ANGLE IS STR(INT) [0, 90] (degrees)
     # STEPPER goes STP:<DIR>:<ANGLE>\n WHERE DIR IS "+" OR "-" AND ANGLE IS STR(INT) [0, 32767] (degrees)
     # DC goes DCM:<MODE>:<DIR>:<VALUE>\n WHERE MODE IS "P" for POSITION or "V" for VELOCITY
     # AND DIR IS "+" OR "-" AND FOR RPM is [0, 60] and for POSITION is [0, 32767] (degrees)
