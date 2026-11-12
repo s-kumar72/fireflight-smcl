@@ -46,6 +46,7 @@ void setup() {
   stepperSetup();
   servoSetup();
   slotSetup();
+  ul_tof_setup();
 }
 
 void loop() {
@@ -58,4 +59,5 @@ void loop() {
   stepperUpdate();
   servoUpdate();
   slotUpdate();
+  ul_tof_update();
 }
