@@ -8,9 +8,10 @@ import serial
 from comms.types import SensorType, MotorType
 import time
 
-SERIAL_PORT = "COM3"
+SERIAL_PORT = "/dev/ttyACM0"
 BAUD_RATE = 115200
 TIMEOUT = 1.0
+SENSOR_REQ_FREQ = 5  # Hz; each cycle requests every sensor in order.
 
 REQUEST_MSGS = {
     SensorType.POTENTIOMETER: b'REQ:POT\n',
@@ -30,11 +31,7 @@ RESPONSE_HEADERS = {
     'DCE': SensorType.DC_ENCODER,
 }
 
-MOTOR_COMMAND_HEADERS = {
-    MotorType.SERVO: 'SER',
-    MotorType.STEPPER: 'STP',
-    MotorType.DC: 'DCM',
-}
+
 
 class CommsNode(Node):
     """Handle communication between ROS 2 and external devices."""
@@ -42,9 +39,6 @@ class CommsNode(Node):
     def __init__(self):
         """Initialize the node and configure communications here."""
         super().__init__('comms')
-
-        # TODO: Set up device connections, publishers, and subscriptions.
-        # Use timer or subscription callbacks for communication logic.
 
         # Arduino goes 0-1023 for adc
 
@@ -80,12 +74,17 @@ class CommsNode(Node):
             self.get_logger().error(f'Failed to open {SERIAL_PORT} at {BAUD_RATE} baud: {exc}')
             raise
         self.get_logger().info(f'Connected to {self.serial.port}')
+        self.sensor_request_timer = self.create_timer(
+            1.0 / SENSOR_REQ_FREQ, self.request_all_sensors)
     
+    # MOTOR CONTROL PROTOCOL NOTE:
+    # SERVO goes SER:<ANGLE>\n WHERE ANGLE IS STR(INT) [0, 180] (degrees, may need to be remapped, check arduino code)
+    # STEPPER goes STP:<DIR>:<ANGLE>\n WHERE DIR IS "+" OR "-" AND ANGLE IS STR(INT) [0, 32767] (degrees)
+    # DC goes DCM:<MODE>:<DIR>:<VALUE>\n WHERE MODE IS "P" for POSITION or "V" for VELOCITY
+    # AND DIR IS "+" OR "-" AND FOR RPM is [0, 60] and for POSITION is [0, 32767] (degrees)
+
     def motorCommandCallback(self, msg: String):
-        msgSplit = msg.data.split(':')
-        motorType = MotorType(int(msgSplit[0]))
-        command = MOTOR_COMMAND_HEADERS[motorType] + ':' + msgSplit[1] + '\n'
-        self.serial.write(command.encode('utf-8'))
+        self.serial.write(msg.data.encode('utf-8'))
 
     # def sensorRequestCallback(self, msg: UInt8):
     #     self.request_data(SensorType(msg.data))
@@ -118,6 +117,10 @@ class CommsNode(Node):
             self.get_logger().warning(f'Response not recognized: {msg}')        
 
     # region Sensor Value Update Functions
+    def request_all_sensors(self):
+        for sensor_type in REQUEST_MSGS:
+            self.request_data(sensor_type)
+
     def request_data(self, sensor_type: SensorType):
         # Sends a request to the Arduino to get some sensor reading
         self.serial.write(REQUEST_MSGS[sensor_type])

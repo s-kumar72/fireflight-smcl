@@ -7,6 +7,7 @@ from threading import Lock
 import time
 
 from python_qt_binding.QtCore import Qt, QTimer, Signal
+from python_qt_binding.QtGui import QIntValidator
 from python_qt_binding.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy,
     QSlider, QVBoxLayout, QWidget,
@@ -22,6 +23,7 @@ UPDATE_PERIOD = 1.0  # Seconds between UI refreshes.
 EST_DATA_FREQ = 5.0  # Hz
 EST_DATA_PERIOD = 1.0 / EST_DATA_FREQ
 HISTORY_NOMINAL_LEN = round(60 * EST_DATA_FREQ)  # One minute of samples.
+MIN_CMD_DELAY = 0.2 # Seconds before sending a new command to the motor
 
 ADC_FULL_SCALE = 1023.0
 
@@ -101,6 +103,10 @@ class SensorChart(FigureCanvasQTAgg):
             self.raw_axes.tick_params(labelsize=6, axis='y', colors='tab:orange')
             self.raw_line, = self.raw_axes.plot(
                 [], [], color='tab:orange', linestyle='--', marker='.', markersize=3)
+            if self.derived_line is not None:
+                # Twin axes draw as a unit; put measurements above the raw trace.
+                self.axes.set_zorder(self.raw_axes.get_zorder() + 1)
+                self.axes.patch.set_visible(False)
         self.axes.set_xlim(-1, 0)
 
     def set_history(self, history):
@@ -136,7 +142,11 @@ class UiWidget(QWidget):
         self.sensor_labels = {}
         self.sensor_sliders = {}
         self.sensor_charts = {}
-        self.motor_charts = {}
+        self.motor_labels = {}
+        self.motor_slider_labels = {}
+        self.motor_sliders = {}
+        self.motor_position_entries = {}
+        self.motor_send_buttons = {}
         self._history_lock = Lock()
 
         # region Values
@@ -156,8 +166,14 @@ class UiWidget(QWidget):
             SensorType.SLOT: self._history(), # [timestamp, isBlocked]
             SensorType.TOF: self._history(), # [timestamp, millimeters, meters]
             MotorType.SERVO: self._history(), # [timestamp, position]
-            MotorType.STEPPER: self._history(), # [timestamp, rpm]
+            MotorType.STEPPER: self._history(), # [timestamp, position]
             SensorType.DC_ENCODER: self._history(), # [timestamp, position]
+        }
+
+        self.last_motor_command_times = {
+            MotorType.SERVO: 0.0,
+            MotorType.STEPPER: 0.0,
+            MotorType.DC: 0.0,
         }
 
         #endregion Values
@@ -219,12 +235,59 @@ class UiWidget(QWidget):
         self._update_timer.timeout.connect(self.update_ui)
         self._update_timer.start(round(UPDATE_PERIOD * 1000))
     # region Publisher and Subscriber Functions
-    def send_motor_command(self, motor_type: MotorType, command: str):
+    def send_motor_command(self, motor_type: MotorType, value: int,
+                           mode='P', force=False):
+        """Publish the serial protocol, silently dropping commands sent too soon."""
         if self.motor_command_pub is None:
-            raise RuntimeError("Motor commands require a ROS node")
+            return False
+        if motor_type == MotorType.SERVO:
+            if not 0 <= value <= 180:
+                return False
+            command = f'SER:{value}\n'
+        else:
+            maximum = 60 if motor_type == MotorType.DC and mode == 'V' else 32767
+            if abs(value) > maximum or mode not in ('P', 'V'):
+                return False
+            direction = '+' if value >= 0 else '-'
+            if motor_type == MotorType.STEPPER:
+                command = f'STP:{direction}:{abs(value)}\n'
+            elif motor_type == MotorType.DC:
+                command = f'DCM:{mode}:{direction}:{abs(value)}\n'
+            else:
+                return False
+        now = time.monotonic()
+        last_sent = self.last_motor_command_times[motor_type]
+        if not force and last_sent and now - last_sent < MIN_CMD_DELAY:
+            return False
         msg = String()
-        msg.data = f"{motor_type.value}:{command}"
+        msg.data = command
         self.motor_command_pub.publish(msg)
+        self.last_motor_command_times[motor_type] = now
+        return True
+
+    def _send_motor_position(self, motor):
+        entry = self.motor_position_entries[motor]
+        if entry.hasAcceptableInput():
+            position = int(entry.text())
+            if self.send_motor_command(motor, position):
+                self.motor_labels[motor].setText(f'POS: {position}°')
+                if motor == MotorType.DC:
+                    slider = self.motor_sliders[motor]
+                    blocked = slider.blockSignals(True)
+                    try:
+                        slider.setValue(0)
+                    finally:
+                        slider.blockSignals(blocked)
+                    self.motor_slider_labels[motor].setText('RPM: 0')
+
+    def _send_motor_slider(self, motor, force=False):
+        value = self.motor_sliders[motor].value()
+        label = f'POS: {value}°' if motor == MotorType.SERVO else f'RPM: {value}'
+        self.motor_slider_labels[motor].setText(label)
+        sent = self.send_motor_command(motor, value, mode='V', force=force)
+        if sent and motor == MotorType.DC:
+            self.motor_position_entries[motor].setText('0')
+            self.motor_labels[motor].setText('POS: 0°')
 
     @staticmethod
     def _history():
@@ -448,6 +511,8 @@ class UiWidget(QWidget):
         layout.addWidget(self.sensor_charts[sensor], 3)
 
     def _motor_contents(self, layout, name):
+        motor = {'Servo': MotorType.SERVO, 'Stepper': MotorType.STEPPER,
+                 'DC': MotorType.DC}[name]
         controls = QWidget()
         controls.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         contents = QVBoxLayout(controls)
@@ -458,32 +523,52 @@ class UiWidget(QWidget):
         contents.addWidget(title)
         contents.addStretch(1)
 
-        if name == 'DC':
+        if name in ('Stepper', 'DC'):
             position_row = QHBoxLayout()
             position = QLabel('POS: —')
             position.setProperty('valuePlaceholder', True)
+            self.motor_labels[motor] = position
             position_row.addWidget(position)
             entry = QLineEdit()
-            entry.setAccessibleName('DC position command')
-            entry.setPlaceholderText('Position')
+            entry.setAccessibleName(f'{name} position command')
+            entry.setPlaceholderText('Position (°)')
+            entry.setValidator(QIntValidator(-32767, 32767, entry))
             entry.setMinimumWidth(0)
             position_row.addWidget(entry, 1)
-            position_row.addWidget(QPushButton('Send'))
+            button = QPushButton('Send')
+            button.setAccessibleName(f'Send {name} position command')
+            button.clicked.connect(lambda checked=False: self._send_motor_position(motor))
+            entry.returnPressed.connect(lambda: self._send_motor_position(motor))
+            self.motor_position_entries[motor] = entry
+            self.motor_send_buttons[motor] = button
+            position_row.addWidget(button)
             contents.addLayout(position_row)
             contents.addStretch(1)
+
+        if name == 'Stepper':
+            layout.addWidget(controls, 1)
+            return
 
         value = QLabel('POS: —' if name == 'Servo' else 'RPM: —')
         value.setProperty('valuePlaceholder', True)
         value.setAlignment(Qt.AlignCenter)
         value.setTextInteractionFlags(Qt.TextSelectableByMouse)
         contents.addWidget(value)
+        self.motor_slider_labels[motor] = value
+        if name == 'Servo':
+            self.motor_labels[motor] = value
 
         slider = QSlider(Qt.Horizontal)
         slider.setAccessibleName(f'{name} slider')
-        slider.setRange(0, 180 if name == 'Servo' else 100)
+        minimum, maximum = (0, 180) if name == 'Servo' else (-60, 60)
+        slider.setRange(minimum, maximum)
+        slider.setValue(0)
+        self.motor_sliders[motor] = slider
+        slider.valueChanged.connect(lambda _: self._send_motor_slider(motor))
+        slider.sliderReleased.connect(lambda: self._send_motor_slider(motor, force=True))
         contents.addWidget(slider)
         endpoints = QHBoxLayout()
-        bounds = ('0°', '180°') if name == 'Servo' else ('a', 'b')
+        bounds = ('0°', '180°') if name == 'Servo' else ('−60 RPM', '+60 RPM')
         for text, alignment in zip(bounds, (Qt.AlignLeft, Qt.AlignRight)):
             endpoint = QLabel(text)
             endpoint.setAlignment(alignment)
@@ -498,15 +583,6 @@ class UiWidget(QWidget):
             chart = SensorChart(raw_label='Encoder position (counts)')
             chart.setAccessibleName('DC encoder history graph')
             self.sensor_charts[SensorType.DC_ENCODER] = chart
-            layout.addWidget(chart, 1)
-        else:
-            motor = MotorType.SERVO if name == 'Servo' else MotorType.STEPPER
-            chart = SensorChart(
-                derived_label='Position (°)' if name == 'Servo' else 'Speed (RPM)')
-            if name == 'Servo':
-                chart.axes.set_ylim(0, 180)
-            chart.setAccessibleName(f'{name} history graph')
-            self.motor_charts[motor] = chart
             layout.addWidget(chart, 1)
     # endregion UI Functions
 
