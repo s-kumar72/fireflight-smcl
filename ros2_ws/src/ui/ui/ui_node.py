@@ -7,6 +7,7 @@ from threading import Lock
 import time
 
 from python_qt_binding.QtCore import Qt, QTimer, Signal
+from python_qt_binding.QtGui import QIntValidator
 from python_qt_binding.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy,
     QSlider, QVBoxLayout, QWidget,
@@ -22,6 +23,9 @@ UPDATE_PERIOD = 1.0  # Seconds between UI refreshes.
 EST_DATA_FREQ = 5.0  # Hz
 EST_DATA_PERIOD = 1.0 / EST_DATA_FREQ
 HISTORY_NOMINAL_LEN = round(60 * EST_DATA_FREQ)  # One minute of samples.
+MIN_CMD_DELAY = 0.2 # Seconds before sending a new command to the motor
+SLOT_RPM_EMA_PERIOD = 7
+SLOT_RPM_EMA_ALPHA = 2.0 / (SLOT_RPM_EMA_PERIOD + 1)
 
 ADC_FULL_SCALE = 1023.0
 
@@ -67,6 +71,64 @@ def tof_meters(millimeters):
     """Convert a VL53L1X ranging result, in millimeters, to meters."""
     return millimeters / 1000.0
 
+
+class SmokeFusion:
+    """Mirror FusionStop's filters, scene confirmation, and threshold hysteresis."""
+
+    STOP_MM = 300
+    RESTART_MM = 400
+    CONFIRM_N = 3
+    US_ALPHA = 0.3
+    TOF_ALPHA = 0.4
+
+    def __init__(self):
+        self.us_filtered_mm = None
+        self.tof_filtered_mm = None
+        self.tof_valid = False
+        self.candidate = 'CLEAR'
+        self.confirmed = 'CLEAR'
+        self.streak = 0
+        self.stopped = False  # Classification latch only; never commands a motor.
+        self._fresh = set()
+
+    def update(self, sensor, raw):
+        if sensor == SensorType.ULTRASONIC:
+            millimeters = raw / ULTRASONIC_COUNTS_PER_INCH * 25.4
+            previous = self.us_filtered_mm
+            self.us_filtered_mm = (millimeters if previous is None else
+                                   self.US_ALPHA * millimeters + (1 - self.US_ALPHA) * previous)
+        elif sensor == SensorType.TOF:
+            # The serial protocol has no range-status field; negative means no echo.
+            self.tof_valid = raw >= 0
+            if self.tof_valid:
+                previous = self.tof_filtered_mm
+                self.tof_filtered_mm = (raw if previous is None else
+                                        self.TOF_ALPHA * raw + (1 - self.TOF_ALPHA) * previous)
+        else:
+            return
+        self._fresh.add(sensor)
+        # Count fresh pairs, rather than counting the same samples on UI refreshes.
+        if len(self._fresh) < 2:
+            return
+        self._fresh.clear()
+        threshold = self.RESTART_MM if self.stopped else self.STOP_MM
+        us_near = int(self.us_filtered_mm) < threshold
+        tof_near = (self.tof_valid and self.tof_filtered_mm is not None
+                    and 0 <= int(self.tof_filtered_mm) < threshold)
+        if us_near:
+            scene = 'SOLID' if tof_near else 'TRANSPARENT'
+        else:
+            scene = 'SMOKE' if tof_near else 'CLEAR'
+        if scene == self.candidate:
+            self.streak = min(self.streak + 1, self.CONFIRM_N)
+        else:
+            self.candidate = scene
+            self.streak = 1
+        if self.streak >= self.CONFIRM_N:
+            self.confirmed = self.candidate
+        self.stopped = self.confirmed in ('SOLID', 'TRANSPARENT')
+
+
 class SensorChart(FigureCanvasQTAgg):
     """Plot a history snapshot with derived and raw values on separate axes."""
 
@@ -101,6 +163,10 @@ class SensorChart(FigureCanvasQTAgg):
             self.raw_axes.tick_params(labelsize=6, axis='y', colors='tab:orange')
             self.raw_line, = self.raw_axes.plot(
                 [], [], color='tab:orange', linestyle='--', marker='.', markersize=3)
+            if self.derived_line is not None:
+                # Twin axes draw as a unit; put measurements above the raw trace.
+                self.axes.set_zorder(self.raw_axes.get_zorder() + 1)
+                self.axes.patch.set_visible(False)
         self.axes.set_xlim(-1, 0)
 
     def set_history(self, history):
@@ -136,7 +202,14 @@ class UiWidget(QWidget):
         self.sensor_labels = {}
         self.sensor_sliders = {}
         self.sensor_charts = {}
-        self.motor_charts = {}
+        self.motor_labels = {}
+        self.motor_slider_labels = {}
+        self.motor_sliders = {}
+        self.motor_position_entries = {}
+        self.motor_send_buttons = {}
+        self.smoke_fusion = SmokeFusion()
+        self._slot_last_rising_time = None
+        self._slot_rpm_ema = None
         self._history_lock = Lock()
 
         # region Values
@@ -153,11 +226,17 @@ class UiWidget(QWidget):
             SensorType.POTENTIOMETER: self._history(), # [timestamp, rawValue, percent]
             SensorType.THERMISTOR: self._history(), # [timestamp, raw ADC, celsius]
             SensorType.ULTRASONIC: self._history(), # [timestamp, raw ADC, meters]
-            SensorType.SLOT: self._history(), # [timestamp, isBlocked]
+            SensorType.SLOT: self._history(), # [timestamp, RPM (7-period EMA)]
             SensorType.TOF: self._history(), # [timestamp, millimeters, meters]
             MotorType.SERVO: self._history(), # [timestamp, position]
-            MotorType.STEPPER: self._history(), # [timestamp, rpm]
+            MotorType.STEPPER: self._history(), # [timestamp, position]
             SensorType.DC_ENCODER: self._history(), # [timestamp, position]
+        }
+
+        self.last_motor_command_times = {
+            MotorType.SERVO: 0.0,
+            MotorType.STEPPER: 0.0,
+            MotorType.DC: 0.0,
         }
 
         #endregion Values
@@ -210,7 +289,7 @@ class UiWidget(QWidget):
             'Time-of-Flight',
         ], sensors=True), 1)
         layout.addWidget(self._column([
-            'Servo', 'Stepper', 'DC', 'Smoke detection placeholder',
+            'Servo', 'Stepper', 'DC', 'Smoke detection',
         ]), 1)
         self.sensor_history_updated.connect(self._refresh_sensor_chart, Qt.QueuedConnection)
         # endregion UI Setup
@@ -219,12 +298,59 @@ class UiWidget(QWidget):
         self._update_timer.timeout.connect(self.update_ui)
         self._update_timer.start(round(UPDATE_PERIOD * 1000))
     # region Publisher and Subscriber Functions
-    def send_motor_command(self, motor_type: MotorType, command: str):
+    def send_motor_command(self, motor_type: MotorType, value: int,
+                           mode='P', force=False):
+        """Publish the serial protocol, silently dropping commands sent too soon."""
         if self.motor_command_pub is None:
-            raise RuntimeError("Motor commands require a ROS node")
+            return False
+        if motor_type == MotorType.SERVO:
+            if not 0 <= value <= 180:
+                return False
+            command = f'SER:{value}\n'
+        else:
+            maximum = 60 if motor_type == MotorType.DC and mode == 'V' else 32767
+            if abs(value) > maximum or mode not in ('P', 'V'):
+                return False
+            direction = '+' if value >= 0 else '-'
+            if motor_type == MotorType.STEPPER:
+                command = f'STP:{direction}:{abs(value)}\n'
+            elif motor_type == MotorType.DC:
+                command = f'DCM:{mode}:{direction}:{abs(value)}\n'
+            else:
+                return False
+        now = time.monotonic()
+        last_sent = self.last_motor_command_times[motor_type]
+        if not force and last_sent and now - last_sent < MIN_CMD_DELAY:
+            return False
         msg = String()
-        msg.data = f"{motor_type.value}:{command}"
+        msg.data = command
         self.motor_command_pub.publish(msg)
+        self.last_motor_command_times[motor_type] = now
+        return True
+
+    def _send_motor_position(self, motor):
+        entry = self.motor_position_entries[motor]
+        if entry.hasAcceptableInput():
+            position = int(entry.text())
+            if self.send_motor_command(motor, position):
+                self.motor_labels[motor].setText(f'POS: {position}°')
+                if motor == MotorType.DC:
+                    slider = self.motor_sliders[motor]
+                    blocked = slider.blockSignals(True)
+                    try:
+                        slider.setValue(0)
+                    finally:
+                        slider.blockSignals(blocked)
+                    self.motor_slider_labels[motor].setText('RPM: 0')
+
+    def _send_motor_slider(self, motor, force=False):
+        value = self.motor_sliders[motor].value()
+        label = f'POS: {value}°' if motor == MotorType.SERVO else f'RPM: {value}'
+        self.motor_slider_labels[motor].setText(label)
+        sent = self.send_motor_command(motor, value, mode='V', force=force)
+        if sent and motor == MotorType.DC:
+            self.motor_position_entries[motor].setText('0')
+            self.motor_labels[motor].setText('POS: 0°')
 
     @staticmethod
     def _history():
@@ -240,6 +366,11 @@ class UiWidget(QWidget):
 
     def _refresh_sensor_chart(self, sensor, history):
         self.sensor_charts[sensor].set_history(history)
+        if sensor in (SensorType.ULTRASONIC, SensorType.TOF):
+            self.smoke_fusion.update(sensor, history[-1][1])
+            self.smoke_label.setText(
+                'SMOKE DETECTED' if self.smoke_fusion.confirmed == 'SMOKE'
+                else 'NO SMOKE DETECTED')
 
     def pot_callback(self, msg: Int32):
         raw = msg.data
@@ -258,8 +389,22 @@ class UiWidget(QWidget):
         self._record(SensorType.ULTRASONIC, raw, ultrasonic_meters(raw))
 
     def slot_callback(self, msg: Bool):
+        previous = self.sensor_values[SensorType.SLOT]
+        now = time.monotonic()
+        # Only an observed Clear -> Blocked transition counts as a rising edge.
+        if msg.data and previous is False:
+            if self._slot_last_rising_time is not None:
+                period = now - self._slot_last_rising_time
+                if period > 0:
+                    rpm = 60.0 / period
+                    self._slot_rpm_ema = (
+                        rpm if self._slot_rpm_ema is None else
+                        SLOT_RPM_EMA_ALPHA * rpm
+                        + (1.0 - SLOT_RPM_EMA_ALPHA) * self._slot_rpm_ema)
+            self._slot_last_rising_time = now
         self.sensor_values[SensorType.SLOT] = msg.data
-        self._record(SensorType.SLOT, msg.data)
+        # Hold the estimate between edges; repeated states must not advance the EMA.
+        self._record(SensorType.SLOT, self._slot_rpm_ema or 0.0)
 
     def tof_callback(self, msg: Int32):
         millimeters = msg.data
@@ -368,13 +513,14 @@ class UiWidget(QWidget):
             contents.setSpacing(12)
             if sensors:
                 self._sensor_contents(contents, text)
-            elif text == 'Smoke detection placeholder':
-                label = QLabel(text)
-                label.setAlignment(Qt.AlignCenter)
-                contents.addWidget(label)
+            elif text == 'Smoke detection':
+                self.smoke_label = QLabel('NO SMOKE DETECTED')
+                self.smoke_label.setAlignment(Qt.AlignCenter)
+                self.smoke_label.setAccessibleName('Smoke detection status')
+                contents.addWidget(self.smoke_label)
             else:
                 self._motor_contents(contents, text)
-            layout.addWidget(cell, 1 if text == 'Smoke detection placeholder' else 2)
+            layout.addWidget(cell, 1 if text == 'Smoke detection' else 2)
         return column
 
     def _sensor_contents(self, layout, name):
@@ -439,15 +585,16 @@ class UiWidget(QWidget):
             SensorType.POTENTIOMETER: ('Position (%)', 'Raw ADC'),
             SensorType.THERMISTOR: ('Temperature (°C)', 'Raw ADC'),
             SensorType.ULTRASONIC: ('Distance (m)', 'Raw ADC'),
-            SensorType.SLOT: ('Slot state', None),
+            SensorType.SLOT: ('RPM (7-period EMA)', None),
             SensorType.TOF: ('Distance (m)', 'Raw (mm)'),
         }[sensor]
-        self.sensor_charts[sensor] = SensorChart(
-            *chart, binary=sensor == SensorType.SLOT)
+        self.sensor_charts[sensor] = SensorChart(*chart)
         self.sensor_charts[sensor].setAccessibleName(f'{name} history graph')
         layout.addWidget(self.sensor_charts[sensor], 3)
 
     def _motor_contents(self, layout, name):
+        motor = {'Servo': MotorType.SERVO, 'Stepper': MotorType.STEPPER,
+                 'DC': MotorType.DC}[name]
         controls = QWidget()
         controls.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         contents = QVBoxLayout(controls)
@@ -458,32 +605,52 @@ class UiWidget(QWidget):
         contents.addWidget(title)
         contents.addStretch(1)
 
-        if name == 'DC':
+        if name in ('Stepper', 'DC'):
             position_row = QHBoxLayout()
             position = QLabel('POS: —')
             position.setProperty('valuePlaceholder', True)
+            self.motor_labels[motor] = position
             position_row.addWidget(position)
             entry = QLineEdit()
-            entry.setAccessibleName('DC position command')
-            entry.setPlaceholderText('Position')
+            entry.setAccessibleName(f'{name} position command')
+            entry.setPlaceholderText('Position (°)')
+            entry.setValidator(QIntValidator(-32767, 32767, entry))
             entry.setMinimumWidth(0)
             position_row.addWidget(entry, 1)
-            position_row.addWidget(QPushButton('Send'))
+            button = QPushButton('Send')
+            button.setAccessibleName(f'Send {name} position command')
+            button.clicked.connect(lambda checked=False: self._send_motor_position(motor))
+            entry.returnPressed.connect(lambda: self._send_motor_position(motor))
+            self.motor_position_entries[motor] = entry
+            self.motor_send_buttons[motor] = button
+            position_row.addWidget(button)
             contents.addLayout(position_row)
             contents.addStretch(1)
+
+        if name == 'Stepper':
+            layout.addWidget(controls, 1)
+            return
 
         value = QLabel('POS: —' if name == 'Servo' else 'RPM: —')
         value.setProperty('valuePlaceholder', True)
         value.setAlignment(Qt.AlignCenter)
         value.setTextInteractionFlags(Qt.TextSelectableByMouse)
         contents.addWidget(value)
+        self.motor_slider_labels[motor] = value
+        if name == 'Servo':
+            self.motor_labels[motor] = value
 
         slider = QSlider(Qt.Horizontal)
         slider.setAccessibleName(f'{name} slider')
-        slider.setRange(0, 180 if name == 'Servo' else 100)
+        minimum, maximum = (0, 180) if name == 'Servo' else (-60, 60)
+        slider.setRange(minimum, maximum)
+        slider.setValue(0)
+        self.motor_sliders[motor] = slider
+        slider.valueChanged.connect(lambda _: self._send_motor_slider(motor))
+        slider.sliderReleased.connect(lambda: self._send_motor_slider(motor, force=True))
         contents.addWidget(slider)
         endpoints = QHBoxLayout()
-        bounds = ('0°', '180°') if name == 'Servo' else ('a', 'b')
+        bounds = ('0°', '180°') if name == 'Servo' else ('−60 RPM', '+60 RPM')
         for text, alignment in zip(bounds, (Qt.AlignLeft, Qt.AlignRight)):
             endpoint = QLabel(text)
             endpoint.setAlignment(alignment)
@@ -498,15 +665,6 @@ class UiWidget(QWidget):
             chart = SensorChart(raw_label='Encoder position (counts)')
             chart.setAccessibleName('DC encoder history graph')
             self.sensor_charts[SensorType.DC_ENCODER] = chart
-            layout.addWidget(chart, 1)
-        else:
-            motor = MotorType.SERVO if name == 'Servo' else MotorType.STEPPER
-            chart = SensorChart(
-                derived_label='Position (°)' if name == 'Servo' else 'Speed (RPM)')
-            if name == 'Servo':
-                chart.axes.set_ylim(0, 180)
-            chart.setAccessibleName(f'{name} history graph')
-            self.motor_charts[motor] = chart
             layout.addWidget(chart, 1)
     # endregion UI Functions
 
