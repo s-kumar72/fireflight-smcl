@@ -15,7 +15,9 @@
   Motor commands are ignored in sensor mode. Switching modes cancels pending
   stepper travel and stops the DC motor; the servo holds until its next target.
   Every accepted DC command zeros the encoder and starts a new relative origin.
-  Sensor requests work in BOTH modes: REQ:POT/THERM/ULTR/SLOT/TOF/DCE/DCR.
+  Sensor requests work in BOTH modes: REQ:POT/THERM/ULTR/SLOT/TOF/DCE/DCR/UIMODE.
+  UIMODE is boolean: 1 = UI control, 0 = sensor control (D13 button state).
+  ULT reports raw 10-bit ADC counts; the UI converts counts to meters.
   SLOT reports integer RPM, 0..4095, using a local three-blade counter.
   DCE is signed encoder counts since the last DC command (420 per revolution).
   DCR is measured shaft RPM; TOF is -1
@@ -111,7 +113,7 @@ SFEVL53L1X tof;
 bool tofOk = false, tofValid = false;
 int tofRawMm = -1;
 float tofFilteredMm = -1;
-int potRaw = 0, thermRaw = 0;
+int potRaw = 0, thermRaw = 0, sonarRaw = 0;
 float sonarFilteredMm = 0;
 float servoDeg = 90;
 unsigned long lastSensorMs = 0, lastServoMs = 0, lastStepUs = 0;
@@ -266,7 +268,8 @@ void sensorsUpdate() {
   long sum = 0;
   for (uint8_t i = 0; i < 16; ++i) sum += analogRead(THERM_PIN);
   thermRaw = sum / 16;
-  sonarFilteredMm = 0.3f * analogRead(SONAR_PIN) * 12.7f + 0.7f * sonarFilteredMm;
+  sonarRaw = analogRead(SONAR_PIN);
+  sonarFilteredMm = 0.3f * sonarRaw * 12.7f + 0.7f * sonarFilteredMm;
 
   int threshold = nearLatched ? 400 : 300;
   bool usNear = sonarFilteredMm < threshold;
@@ -356,9 +359,10 @@ void reply(const char *header, long value) {
 void handleRequest(const char *cmd) {
   if (strcmp(cmd, "REQ:POT") == 0) reply("POT:", potRaw);
   else if (strcmp(cmd, "REQ:THERM") == 0) reply("TRM:", thermRaw);
-  else if (strcmp(cmd, "REQ:ULTR") == 0) reply("ULT:", lround(sonarFilteredMm));
+  else if (strcmp(cmd, "REQ:ULTR") == 0) reply("ULT:", sonarRaw);
   else if (strcmp(cmd, "REQ:SLOT") == 0) reply("SLT:", slotHandleRequest());
   else if (strcmp(cmd, "REQ:TOF") == 0) reply("TOF:", tofValid ? tofRawMm : -1);
+  else if (strcmp(cmd, "REQ:UIMODE") == 0) reply("UIMODE:", controlMode == UI_CONTROL);
   else if (strcmp(cmd, "REQ:DCE") == 0) {
     reply("DCE:", readEncoder());
   } else if (strcmp(cmd, "REQ:DCR") == 0) {
@@ -455,7 +459,8 @@ void setup() {
     tof.startRanging();
   }
   // Sonar's power-on calibration can finish while the loop services serial.
-  sonarFilteredMm = analogRead(SONAR_PIN) * 12.7f;
+  sonarRaw = analogRead(SONAR_PIN);
+  sonarFilteredMm = sonarRaw * 12.7f;
   lastSensorMs = millis() - 50;
   sensorsUpdate();
   resetControllers();

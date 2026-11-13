@@ -13,7 +13,7 @@ from python_qt_binding.QtWidgets import (
     QSlider, QVBoxLayout, QWidget,
 )
 from rqt_gui_py.plugin import Plugin
-from std_msgs.msg import String, Int32, Float32
+from std_msgs.msg import Bool, String, Int32, Float32
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
@@ -243,6 +243,7 @@ class UiWidget(QWidget):
             SensorType.TOF: None,
             SensorType.DC_ENCODER: 0,
             SensorType.DC_RPM: 0.0,
+            SensorType.UI_MODE: None,
         }
 
         self.data_history = {
@@ -276,12 +277,13 @@ class UiWidget(QWidget):
 
             self.dc_encoder_sub = node.create_subscription(Int32, 'dc_encoder', self.dc_encoder_callback, 10)
             self.dc_rpm_sub = node.create_subscription(Float32, 'dc_rpm', self.dc_rpm_callback, 10)
+            self.ui_mode_sub = node.create_subscription(Bool, 'ui_mode', self.ui_mode_callback, 10)
             # Stepper and servo are technically open-loop, so no subs for these
             # endregion Publishers and Subscribers
 
             self._subscriptions = [self.pot_sub, self.thermistor_sub,
                 self.ultrasonic_sub, self.slot_sub, self.tof_sub, self.dc_encoder_sub,
-                self.dc_rpm_sub]
+                self.dc_rpm_sub, self.ui_mode_sub]
 
         # region UI Setup
         self.setObjectName('FireFlightUi')
@@ -441,6 +443,9 @@ class UiWidget(QWidget):
         self.sensor_values[SensorType.DC_RPM] = msg.data
         self._record(SensorType.DC_ENCODER, self._dc_position_deg, msg.data)
 
+    def ui_mode_callback(self, msg: Bool):
+        self.sensor_values[SensorType.UI_MODE] = msg.data
+
     # endregion Subscriber Callbacks
 
     # region Update Functions
@@ -454,6 +459,12 @@ class UiWidget(QWidget):
         self.update_servo_ui()
         self.update_stepper_ui()
         self.update_dc_ui()
+        self.update_ui_mode_ui()
+
+    def update_ui_mode_ui(self):
+        ui_mode = self.sensor_values[SensorType.UI_MODE]
+        if ui_mode is not None:
+            self.control_mode_label.setText('UI Control' if ui_mode else 'Sensor Control')
     
     def update_pot_ui(self):
         raw = self.sensor_values[SensorType.POTENTIOMETER]
@@ -529,6 +540,30 @@ class UiWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
         for text in labels:
+            if text == 'Smoke detection':
+                row = QWidget()
+                row_layout = QHBoxLayout(row)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.setSpacing(12)
+                self.smoke_label = QLabel('NO SMOKE DETECTED')
+                self.smoke_label.setAccessibleName('Smoke detection status')
+                self.smoke_label.setWordWrap(True)
+                self.control_mode_label = QLabel('—')
+                self.control_mode_label.setAccessibleName('Control mode status')
+                for title, value in ((None, self.smoke_label),
+                                     ('Control Mode', self.control_mode_label)):
+                    status_cell = QFrame()
+                    status_cell.setProperty('uiCell', True)
+                    status_cell.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+                    status_layout = QVBoxLayout(status_cell)
+                    status_layout.setContentsMargins(12, 10, 12, 10)
+                    if title:
+                        status_layout.addWidget(QLabel(title))
+                    value.setAlignment(Qt.AlignCenter)
+                    status_layout.addWidget(value, 1)
+                    row_layout.addWidget(status_cell, 1)
+                layout.addWidget(row, 1)
+                continue
             cell = QFrame()
             cell.setProperty('uiCell', True)
             cell.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
@@ -537,14 +572,9 @@ class UiWidget(QWidget):
             contents.setSpacing(12)
             if sensors:
                 self._sensor_contents(contents, text)
-            elif text == 'Smoke detection':
-                self.smoke_label = QLabel('NO SMOKE DETECTED')
-                self.smoke_label.setAlignment(Qt.AlignCenter)
-                self.smoke_label.setAccessibleName('Smoke detection status')
-                contents.addWidget(self.smoke_label)
             else:
                 self._motor_contents(contents, text)
-            layout.addWidget(cell, 1 if text == 'Smoke detection' else 2)
+            layout.addWidget(cell, 2)
         return column
 
     def _sensor_contents(self, layout, name):

@@ -3,7 +3,7 @@
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32, Int32, UInt8, String
+from std_msgs.msg import Bool, Float32, Int32, UInt8, String
 import serial
 from comms.types import SensorType, MotorType
 import time
@@ -21,6 +21,7 @@ REQUEST_MSGS = {
     SensorType.TOF: b'REQ:TOF\n',
     SensorType.DC_ENCODER: b'REQ:DCE\n',
     SensorType.DC_RPM: b'REQ:DCR\n',
+    SensorType.UI_MODE: b'REQ:UIMODE\n',
 }
 
 RESPONSE_HEADERS = {
@@ -31,6 +32,7 @@ RESPONSE_HEADERS = {
     'TOF': SensorType.TOF,
     'DCE': SensorType.DC_ENCODER,
     'DCR': SensorType.DC_RPM,
+    'UIMODE': SensorType.UI_MODE,
 }
 
 
@@ -53,6 +55,7 @@ class CommsNode(Node):
         self.tof_pub = self.create_publisher(Int32, 'tof', 10) # 0~4000
         self.dc_encoder_pub = self.create_publisher(Int32, 'dc_encoder', 10) # Signed counts, 420/rev
         self.dc_rpm_pub = self.create_publisher(Float32, 'dc_rpm', 10)
+        self.ui_mode_pub = self.create_publisher(Bool, 'ui_mode', 10)
 
         # Was thinking don't request from UI, just request here repeatedly
         # self.read_request_sub = self.create_subscription(
@@ -70,6 +73,7 @@ class CommsNode(Node):
             SensorType.TOF: 0,
             SensorType.DC_ENCODER: 0,
             SensorType.DC_RPM: 0.0,
+            SensorType.UI_MODE: None,
         }
         
         try:
@@ -88,6 +92,7 @@ class CommsNode(Node):
     # AND DIR IS "+" OR "-" AND FOR RPM is [0, 60] and for POSITION is [0, 32767] (degrees)
     # Each DC command resets the encoder origin; POSITION is a relative rotation.
     # DCE reports signed counts since that reset; DCR reports measured RPM.
+    # REQ:UIMODE returns UIMODE:1 for UI control, UIMODE:0 for sensor control.
 
     def motorCommandCallback(self, msg: String):
         self.serial.write(msg.data.encode('utf-8'))
@@ -121,6 +126,8 @@ class CommsNode(Node):
                     self.updateDcEncoderValue(msgSplit[1])
                 case SensorType.DC_RPM:
                     self.updateDcRpmValue(msgSplit[1])
+                case SensorType.UI_MODE:
+                    self.updateUIModeValue(msgSplit[1])
         else:
             self.get_logger().warning(f'Response not recognized: {msg}')        
 
@@ -160,6 +167,14 @@ class CommsNode(Node):
     def updateDcRpmValue(self, value: str):
         self.sensor_values[SensorType.DC_RPM] = float(value)
         self.dc_rpm_pub.publish(Float32(data=self.sensor_values[SensorType.DC_RPM]))
+
+    def updateUIModeValue(self, value: str):
+        value = value.strip()
+        if value not in ('0', '1'):
+            self.get_logger().warning(f'Invalid UIMode boolean: {value}')
+            return
+        self.sensor_values[SensorType.UI_MODE] = value == '1'
+        self.ui_mode_pub.publish(Bool(data=self.sensor_values[SensorType.UI_MODE]))
     # endregion Sensor Value Update Functions
 
 def main(args=None):

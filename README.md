@@ -29,3 +29,16 @@ Scene classification (Clear, Smoke, Transparent, Solid) using Ultrasonic and TOF
 - Thermistor controls servo so that it can moves the thermal camera towards the higher temp region & transfer function
 - Potentiometer controls stepper to adjust the motor speed for spinning radar
 
+The UI's bottom-right row shows smoke detection on the left and **Control Mode**
+on the right. In `smcl_integrated`, the debounced button on digital 13 toggles
+between **Sensor Control** (startup) and **UI Control**. The `UIMode` sensor
+accepts `REQ:UIMODE\n` in either mode and replies with `UIMODE:0\n` for sensor
+control or `UIMODE:1\n` for UI control. Comms publishes `std_msgs/Bool` on
+`ui_mode` (`true` means UI control); the display shows `—` until a reply arrives.
+
+Ultrasonic telemetry uses raw 10-bit ADC counts: `REQ:ULTR\n` replies with
+`ULT:<ADC>\n`. With the MaxSonar scaling assumed by this project (Vcc/512 volts
+per inch and ADC reference equal to Vcc), distance is `ADC / 2` inches or
+`ADC × 0.0127` meters. For example, ADC 100 displays 1.27 m. The Arduino keeps
+a separate filtered millimeter value for its sensor control logic.
+

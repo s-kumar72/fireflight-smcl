@@ -11,6 +11,7 @@ class SensorType(Enum):
     TOF = 4
     DC_ENCODER = 5
     DC_RPM = 6
+    UI_MODE = 7
 
 
 class MotorType(Enum):

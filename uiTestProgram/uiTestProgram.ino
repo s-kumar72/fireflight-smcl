@@ -5,6 +5,7 @@
 // Send a newline-terminated request at 115200 baud to receive one raw reading:
 // REQ:POT -> POT:<ADC>, REQ:THERM -> TRM:<ADC>, REQ:ULTR -> ULT:<ADC>,
 // REQ:SLOT -> SLT:<0 or 1>, REQ:TOF -> TOF:<mm>, REQ:DCE -> DCE:<counts>.
+// REQ:UIMODE -> UIMODE:1 (simulates UI control; no mode button).
 // Motor commands receive a brief description; no motors are driven:
 // SER:<angle>, STP:<+|->:<angle>, DCM:<P|V>:<+|->:<value>.
 // Unknown or invalid commands are ignored. No unsolicited output.
@@ -88,6 +89,8 @@ void handleRequest(const char* command) {
     sendReading("TOF", random(40, 4001));
   } else if (strcmp(command, "REQ:DCE") == 0) {
     sendReading("DCE", random(0, 4097));
+  } else if (strcmp(command, "REQ:UIMODE") == 0) {
+    sendReading("UIMODE", 1);
   } else {
     handleMotorCommand(command);
   }
