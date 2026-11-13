@@ -46,6 +46,7 @@ ULTRASONIC_MIN_INCHES = 6.0
 ULTRASONIC_MAX_INCHES = 254.0
 ULTRASONIC_MIN_METERS = ULTRASONIC_MIN_INCHES * INCH_TO_METER
 ULTRASONIC_MAX_METERS = ULTRASONIC_MAX_INCHES * INCH_TO_METER
+ULTRASONIC_EMA_ALPHA = 2.0 / (10 + 1)  # 10-sample EMA of converted meters only.
 
 # VL53L1X reports ranging distance in millimeters. Long mode reaches 4 m, and
 # the datasheet only ensures ranging down to 4 cm.
@@ -264,6 +265,7 @@ class UiWidget(QWidget):
         self.motor_send_buttons = {}
         self.smoke_fusion = SmokeFusion()
         self._dc_position_deg = 0.0
+        self._ultrasonic_filtered_m = None
         self._stepper_requested_deg = None
         self._history_lock = Lock()
 
@@ -448,9 +450,14 @@ class UiWidget(QWidget):
         self.sensor_charts[sensor].set_history(history)
         if sensor in (SensorType.ULTRASONIC, SensorType.TOF):
             self.smoke_fusion.update(sensor, history[-1][1])
-            self.smoke_label.setText(
-                'SMOKE DETECTED' if self.smoke_fusion.confirmed == 'SMOKE'
-                else 'NO SMOKE DETECTED')
+            self._update_detection_status()
+
+    def _update_detection_status(self):
+        scene = self.smoke_fusion.confirmed
+        smoke = 'SMOKE DETECTED' if scene == 'SMOKE' else 'NO SMOKE DETECTED'
+        transparent = ('TRANSPARENT OBJECT DETECTED' if scene == 'TRANSPARENT'
+                       else 'NO TRANSPARENT OBJECT DETECTED')
+        self.smoke_label.setText(f'{smoke} | {transparent}')
 
     def pot_callback(self, msg: Int32):
         raw = msg.data
@@ -466,7 +473,14 @@ class UiWidget(QWidget):
     def ultrasonic_callback(self, msg: Int32):
         raw = msg.data
         self.sensor_values[SensorType.ULTRASONIC] = raw
-        self._record(SensorType.ULTRASONIC, raw, ultrasonic_meters(raw))
+        meters = ultrasonic_meters(raw)
+        if meters is None or self._ultrasonic_filtered_m is None:
+            # Seed from the first valid sample; reset across invalid readings.
+            self._ultrasonic_filtered_m = meters
+        else:
+            self._ultrasonic_filtered_m += ULTRASONIC_EMA_ALPHA * (
+                meters - self._ultrasonic_filtered_m)
+        self._record(SensorType.ULTRASONIC, raw, self._ultrasonic_filtered_m)
 
     def slot_callback(self, msg: Int32):
         rpm = max(0, min(SLOT_RPM_MAX, msg.data))
@@ -536,7 +550,7 @@ class UiWidget(QWidget):
         raw = self.sensor_values[SensorType.ULTRASONIC]
         if raw is not None:
             self._update_range_display(
-                SensorType.ULTRASONIC, ultrasonic_meters(raw),
+                SensorType.ULTRASONIC, self._ultrasonic_filtered_m,
                 ultrasonic_invalid_reason(raw), ULTRASONIC_MAX_METERS)
 
     def update_slot_ui(self):
@@ -612,8 +626,9 @@ class UiWidget(QWidget):
                 row_layout = QHBoxLayout(row)
                 row_layout.setContentsMargins(0, 0, 0, 0)
                 row_layout.setSpacing(12)
-                self.smoke_label = QLabel('NO SMOKE DETECTED')
-                self.smoke_label.setAccessibleName('Smoke detection status')
+                self.smoke_label = QLabel()
+                self._update_detection_status()
+                self.smoke_label.setAccessibleName('Smoke and transparent object detection status')
                 self.smoke_label.setWordWrap(True)
                 self.control_mode_label = QLabel('—')
                 self.control_mode_label.setAccessibleName('Control mode status')
