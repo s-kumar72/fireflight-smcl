@@ -20,7 +20,7 @@
   UIMODE is boolean: 1 = UI control, 0 = sensor control (D13 button state).
   ULT reports raw 10-bit ADC counts; the UI converts counts to meters.
   SLOT reports integer RPM, 0..4095, using a local three-blade counter.
-  DCE is signed encoder counts since the last DC command (420 per revolution).
+  DCE is signed encoder counts since the last DC command (90 per revolution).
   DES_RPM is commanded shaft RPM (the filtered ultrasonic target in sensor mode).
   DCR is measured shaft RPM; TOF is -1
   when unavailable/invalid. Only protocol replies are written to Serial.
@@ -106,7 +106,7 @@ const uint8_t ENCODER_A = 2, ENCODER_B = 3;
 const uint8_t MOTOR_PWM = 6, MOTOR_IN1 = 7, MOTOR_IN2 = 8;
 const uint8_t SERVO_PIN = 9, STEP_PIN = 10, DIR_PIN = 11;
 const float SERVO_MAX_DEG = 90.0f;
-const float ENCODER_CPR = 420.0f;
+const float ENCODER_CPR = 90.0f;
 const float DEG_PER_STEP = 360.0f / (200L * 8);
 const unsigned long STEP_INTERVAL_US = 1000;
 

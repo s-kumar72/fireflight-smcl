@@ -25,7 +25,7 @@ EST_DATA_PERIOD = 1.0 / EST_DATA_FREQ
 HISTORY_NOMINAL_LEN = round(60 * EST_DATA_FREQ)  # One minute of samples.
 MIN_CMD_DELAY = 0.2 # Seconds before sending a new command to the motor
 SLOT_RPM_MAX = 4095
-DC_ENCODER_CPR = 420.0  # Matches smcl_integrated's rising-edge encoder counter.
+DC_ENCODER_CPR = 90.0  # Matches smcl_integrated's rising-edge encoder counter.
 
 ADC_FULL_SCALE = 1023.0
 
