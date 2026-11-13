@@ -21,6 +21,20 @@ Raw counts were measured by placing a folded paper dial (45 degree increments) u
 **TOF & ultrasonic sensors:**
 Scene classification (Clear, Smoke, Transparent, Solid) using Ultrasonic and TOF sensor (based on https://arxiv.org/pdf/2510.06518 )
 
+| Ultrasonic | ToF | Scene |
+|---|---|---|
+| far | far | CLEAR |
+| near | near | SOLID |
+| near | far / no valid echo | TRANSPARENT |
+| far | near | SMOKE |
+
+- **"Near"** = closer than 300 mm. A ToF reading only counts if the sensor marks it valid (range status 0).
+- **Filtering:** exponential moving average on both sensors.
+- **Hysteresis:** once SOLID or TRANSPARENT is detected, the object must move past 400 mm to clear. This stops the label flickering at the edge.
+- **Temporal consistency:** a new scene must appear in 3 consecutive readings (about 150 ms) before it is accepted, a simplified version of the paper's multi-frame check.
+- **Limitation:** a single-point ToF also loses its echo on dark or steeply angled surfaces, so these can be mislabelled TRANSPARENT.
+
+
 **Slot sensor:**
 
 **Ultrasonic sensor:**
