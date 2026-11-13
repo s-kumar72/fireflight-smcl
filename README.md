@@ -32,6 +32,21 @@ Scene classification (Clear, Smoke, Transparent, Solid) using Ultrasonic and TOF
 - **Filtering:** exponential moving average on both sensors.
 
 **Slot sensor:**
+Omron EE-SX1042 on D12. Each beam break is counted and converted to RPM over a 1 s window, assuming 3 blades per revolution (true RPM = passes/s × 20).
+
+_Measured error_: tested by hand, passing a cardboard through the slot in time with a metronome, up to 5 passes/s (the fastest we could do without a rotor).
+
+| Passes/s | True RPM | GUI RPM | Error (RPM) |
+|---|---|---|---|
+| 1 | 20 | 20 | 0 |
+| 2 | 40 | 40 | 0 |
+| 3 | 60 | 60 | 0 |
+| 4 | 80 | 80 | 0 |
+| 5 | 100 | 100 | 0 |
+
+- No missed counts at any tested rate
+- RPM resolution is 20 RPM (60 / (3 blades × 1 s window)), so a pass landing on the window edge shifts the reading by one step
+- Speeds above 100 RPM are untested
 
 **Ultrasonic sensor:**
 
