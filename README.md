@@ -14,7 +14,7 @@ Raw counts were measured by placing a folded paper dial (45 degree increments) u
 - Measured error: max 1.47°, RMS 0.90° (most of this is probably measurement error)
 - Since a pot is a resistive voltage divider with no dynamics, its transfer function is just a gain (3.649 counts / degree - same as slope from best fit line)
 
-![Potentiometer transfer function](pot_tf_plot.png)
+![Potentiometer transfer function](calibration/pot_tf_plot.png)
 
 **Thermistor:**
 - `smcl/thermistor.ino` / `smcl_integrated`: 10 kΩ NTC (Vishay NTCLE100E3103JB0) on A3, 10 kΩ pull-up to 5 V. 16 ADC samples averaged; ADC → resistance → β equation → °C. Drives the servo in sensor mode.
