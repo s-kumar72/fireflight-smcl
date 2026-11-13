@@ -34,10 +34,6 @@ Scene classification (Clear, Smoke, Transparent, Solid) using Ultrasonic and TOF
 **Slot sensor:**
 
 **Ultrasonic sensor:**
-- .
-- DC Motor RPM control (PID) based on distance from object using ultrasonic sensor.
-- Thermistor controls servo so that it can moves the thermal camera towards the higher temp region & transfer function
-- Potentiometer controls stepper to adjust the motor speed for spinning radar
 
 The UI's bottom-right row shows smoke detection on the left and **Control Mode**
 on the right. In `smcl_integrated`, the debounced button on digital 13 toggles
@@ -51,4 +47,9 @@ Ultrasonic telemetry uses raw 10-bit ADC counts: `REQ:ULTR\n` replies with
 per inch and ADC reference equal to Vcc), distance is `ADC / 2` inches or
 `ADC × 0.0127` meters. For example, ADC 100 displays 1.27 m. The Arduino keeps
 a separate filtered millimeter value for its sensor control logic.
+
+# INDIVIDUAL CONTRIBUTIONS & CHALLENGES:
+### Sadhana Kumar 
+- _Contributions_: Implemented potentiometer reading and ADC-to-angle conversion and integrated the serial request handler for the comms node. Implemented a non-blocking STEP/DIR stepper driver for the EasyDriver so the potentiometer angle and the stepper angle are linked (pot can be used to change the angle of the stepper). Also measured the pot's transfer function with a paper angle dial at 45 degree increments and plotted this along with the measurement error. Wired and tested the pot, EasyDriver, and stepper on the bench supply. Added reporting of the stepper's actual angle moved for GUI commands.
+- _Challenges_: Calibration errors from a slipping pointer (initial attempts gave readings at only 70% of the dial angles because the paper pointer was twisting on the knob. This was fixed by taping the pointer all the way around the knob and by checking for ~165 counts per 45 degrees while measuring. Also, the EasyDriver's LED stayed off even while other parts of the circuit had power / LEDs on; I traced the 12V supply voltage step by step using the multimeter and found that the other driver's lit LED had been lit by the Arduino's USB power, not the 12V rail as assumed. This helped deduce that the wires clipped to the banana plugs had come undone. 
 
