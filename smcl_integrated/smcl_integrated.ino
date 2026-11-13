@@ -139,8 +139,8 @@ struct PID {
 };
 // Keep Arduino's generated prototypes from referring to PID before its definition.
 float computePID(PID &pid, float target, float measurement, float dt);
-PID posPID = {5.0f, 0.10f, 0.2f, 0, 0, 100};
-PID velPID = {1.0f, 2.0f, 0.001f, 0, 0, 200};
+PID posPID = {2.0f, 0.05f, 0.5f, 0, 0, 100};
+PID velPID = {2.0f, 2.0f, 0.001f, 0, 0, 200};
 unsigned long lastPIDMs = 0;
 
 const uint8_t CMD_MAX = 32;
