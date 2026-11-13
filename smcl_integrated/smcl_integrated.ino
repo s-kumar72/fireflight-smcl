@@ -244,7 +244,7 @@ void servoSetDeg(float degrees) {
 float thermCelsius(int adc) {
   adc = constrain(adc, 1, 1022);
   float resistance = 10000.0f * adc / (1023.0f - adc);
-  return 1.0f / (1.0f / 298.15f + log(resistance / 10000.0f) / 3950.0f) - 273.15f;
+  return 1.0f / (1.0f / 298.15f + log(resistance / 10000.0f) / 3220.0f) - 273.15f;
 }
 
 float distanceRPM(float mm) {

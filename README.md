@@ -17,6 +17,15 @@ Raw counts were measured by placing a folded paper dial (45 degree increments) u
 ![Potentiometer transfer function](pot_tf_plot.png)
 
 **Thermistor:**
+- `smcl/thermistor.ino` / `smcl_integrated`: 10 kΩ NTC (Vishay NTCLE100E3103JB0) on A3, 10 kΩ pull-up to 5 V. 16 ADC samples averaged; ADC → resistance → β equation → °C. Drives the servo in sensor mode.
+
+_Calibration & error_:
+β was fitted against an IR thermometer (±1.5 °C) on 6 points (25–45 °C): β = 3220 (datasheet: 3977). It was then validated on 17 independent points over 30–49 °C, read from the GUI:
+
+- Measured error: RMS 1.3 °C, max 2.3 °C, mean bias +0.1 °C
+- The residual follows the cooling curve (thermistor reads high around 35 °C and low around 47 °C), which points to timing lag between the thermistor bead and the IR surface reading. Most points fall within the reference's own ±1.5 °C.
+
+![Thermistor error](thermistor_error_plot.png)
 
 **TOF & ultrasonic sensors:**
 Scene classification (Clear, Smoke, Transparent, Solid) using Ultrasonic and TOF sensor (based on https://arxiv.org/pdf/2510.06518 )
