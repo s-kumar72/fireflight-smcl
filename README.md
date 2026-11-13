@@ -74,3 +74,8 @@ a separate filtered millimeter value for its sensor control logic.
 
 Challenges
 - I spent about three hours debugging the board because the arduino was not reading whether the slot was open or blocked. The symptom was that the sensor output never changed state regardless of whether the beam was broken. I used a multimeter to check for continuity and voltage drop across the circuit and was able to find that the resistor being used had too high resistance whcih limited the current causing the output to never reached the arduino. This taught me that resistor selection isn’t just about preventing damage from excess current, it also has to supply enough current for the sensor’s output stage to function correctly.
+
+#### Percy Wu
+- I worked on the comms_node and the ui_node. The comms_node serves as a bridge between the Arduino's serial connection to the local ros network. It is responsible for requesting sensor readings and sending motor commands to the Arduino, as well as forwarding sensor readings to the ros network. The ui_node converts the sensor readings from raw values to actual measurements, stores them in a circular buffer, and displays the instantaneous values + plot of sensor measurement history to the user. It also enables the user to send commands to the Arduino for motor control by sending commands over the ros network which is then forwarded by the comms_node.
+
+Challenges: 
