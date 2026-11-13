@@ -40,10 +40,19 @@ THERMISTOR_BETA = 3220.0
 # using that same Vcc therefore has 1024/512 = 2 counts per inch.
 ULTRASONIC_COUNTS_PER_INCH = 1024.0 / 512.0
 INCH_TO_METER = 0.0254
-ULTRASONIC_MAX_METERS = 254.0 * INCH_TO_METER
+# The sensor cannot range closer than 6 in or farther than 254 in; it holds
+# its output at those limits instead, so a reading AT a limit is out of range.
+ULTRASONIC_MIN_INCHES = 6.0
+ULTRASONIC_MAX_INCHES = 254.0
+ULTRASONIC_MIN_METERS = ULTRASONIC_MIN_INCHES * INCH_TO_METER
+ULTRASONIC_MAX_METERS = ULTRASONIC_MAX_INCHES * INCH_TO_METER
 
-# VL53L1X reports ranging distance in millimeters. Long mode reaches 4 m.
-TOF_MAX_METERS = 4.0
+# VL53L1X reports ranging distance in millimeters. Long mode reaches 4 m, and
+# the datasheet only ensures ranging down to 4 cm.
+TOF_MIN_MM = 40
+TOF_MAX_MM = 4000
+TOF_MIN_METERS = TOF_MIN_MM / 1000.0
+TOF_MAX_METERS = TOF_MAX_MM / 1000.0
 
 def thermistor_celsius(raw):
     """Convert a 10-bit ADC count using the Arduino thermistor beta model."""
@@ -56,13 +65,36 @@ def thermistor_celsius(raw):
     )
     return kelvin - 273.15
 
+def ultrasonic_invalid_reason(raw):
+    """Return why a MaxBotix count is out of range, or None when it is valid."""
+    inches = raw / ULTRASONIC_COUNTS_PER_INCH
+    if inches <= ULTRASONIC_MIN_INCHES:
+        return f'< {ULTRASONIC_MIN_METERS:.2f} m'
+    if inches >= ULTRASONIC_MAX_INCHES:
+        return f'> {ULTRASONIC_MAX_METERS:.2f} m'
+    return None
+
 def ultrasonic_meters(raw):
-    """Convert a 10-bit MaxBotix analog count to meters."""
+    """Convert a 10-bit MaxBotix analog count to meters; None if out of range."""
+    if ultrasonic_invalid_reason(raw) is not None:
+        return None
     inches = raw / ULTRASONIC_COUNTS_PER_INCH
     return inches * INCH_TO_METER
 
+def tof_invalid_reason(millimeters):
+    """Return why a VL53L1X result is out of range, or None when it is valid."""
+    if millimeters < 0:
+        return 'no reading'  # smcl_integrated sends -1 for a bad range status.
+    if millimeters < TOF_MIN_MM:
+        return f'< {TOF_MIN_METERS:.2f} m'
+    if millimeters > TOF_MAX_MM:
+        return f'> {TOF_MAX_METERS:.2f} m'
+    return None
+
 def tof_meters(millimeters):
-    """Convert a VL53L1X ranging result, in millimeters, to meters."""
+    """Convert a VL53L1X result, in millimeters, to meters; None if out of range."""
+    if tof_invalid_reason(millimeters) is not None:
+        return None
     return millimeters / 1000.0
 
 
@@ -484,9 +516,9 @@ class UiWidget(QWidget):
     def update_ultrasonic_ui(self):
         raw = self.sensor_values[SensorType.ULTRASONIC]
         if raw is not None:
-            meters = ultrasonic_meters(raw)
-            self._update_sensor_display(SensorType.ULTRASONIC, meters,
-                                        f'{meters:.2f} m', ULTRASONIC_MAX_METERS)
+            self._update_range_display(
+                SensorType.ULTRASONIC, ultrasonic_meters(raw),
+                ultrasonic_invalid_reason(raw), ULTRASONIC_MAX_METERS)
 
     def update_slot_ui(self):
         rpm = self.sensor_values[SensorType.SLOT]
@@ -496,9 +528,18 @@ class UiWidget(QWidget):
     def update_tof_ui(self):
         millimeters = self.sensor_values[SensorType.TOF]
         if millimeters is not None:
-            meters = tof_meters(millimeters)
-            self._update_sensor_display(SensorType.TOF, meters,
-                                        f'{meters:.2f} m', TOF_MAX_METERS)
+            self._update_range_display(
+                SensorType.TOF, tof_meters(millimeters),
+                tof_invalid_reason(millimeters), TOF_MAX_METERS)
+
+    def _update_range_display(self, sensor, meters, invalid_reason, maximum):
+        """Show a distance, or INVALID when it is outside the sensor's range."""
+        if invalid_reason is None:
+            self._update_sensor_display(sensor, meters, f'{meters:.2f} m', maximum)
+            return
+        self.sensor_labels[sensor].setText(f'Value: INVALID ({invalid_reason})')
+        slider = self.sensor_sliders[sensor]
+        slider.setValue(slider.maximum() if invalid_reason.startswith('>') else 0)
 
     def _update_sensor_display(self, sensor, value, text, maximum):
         self.sensor_labels[sensor].setText(f'Value: {text}')
