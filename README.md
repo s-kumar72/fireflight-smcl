@@ -40,6 +40,12 @@ Scene classification (Clear, Smoke, Transparent, Solid) using Ultrasonic and TOF
 - **"Near"** = closer than 300 mm. A ToF reading only counts if the sensor marks it valid (range status 0).
 - **Filtering:** exponential moving average on both sensors.
 
+- Error Measurement (Ultrasonic Sensor)
+<img width="323" height="218" alt="image" src="https://github.com/user-attachments/assets/1f5b5ee4-316a-44cb-9788-b40655fc91c4" />
+
+- Error Measurement (TOF Sensor)
+<img width="322" height="216" alt="image" src="https://github.com/user-attachments/assets/9753df82-6a97-4dc2-aa1e-19a0663711f3" />
+
 **Slot sensor:**
 Omron EE-SX1042 on D12. Each beam break is counted and converted to RPM over a 1 s window, assuming 3 blades per revolution (true RPM = passes/s × 20).
 
