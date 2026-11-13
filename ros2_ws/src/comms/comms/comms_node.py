@@ -5,13 +5,14 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float32, Int32, UInt8, String
 import serial
+from itertools import cycle
 from comms.types import SensorType, MotorType
 import time
 
 SERIAL_PORT = "/dev/ttyACM0"
 BAUD_RATE = 115200
 TIMEOUT = 1.0
-SENSOR_REQ_FREQ = 5  # Hz; each cycle requests every sensor in order.
+SENSOR_REQ_FREQ = 5  # Hz per sensor; requests are spaced evenly across a cycle.
 
 REQUEST_MSGS = {
     SensorType.POTENTIOMETER: b'REQ:POT\n',
@@ -82,8 +83,9 @@ class CommsNode(Node):
             self.get_logger().error(f'Failed to open {SERIAL_PORT} at {BAUD_RATE} baud: {exc}')
             raise
         self.get_logger().info(f'Connected to {self.serial.port}')
+        self._sensor_requests = cycle(REQUEST_MSGS)
         self.sensor_request_timer = self.create_timer(
-            1.0 / SENSOR_REQ_FREQ, self.request_all_sensors)
+            1.0 / (SENSOR_REQ_FREQ * len(REQUEST_MSGS)), self.request_next_sensor)
     
     # MOTOR CONTROL PROTOCOL NOTE:
     # SERVO goes SER:<ANGLE>\n WHERE ANGLE IS STR(INT) [0, 180] (degrees)
@@ -132,9 +134,10 @@ class CommsNode(Node):
             self.get_logger().warning(f'Response not recognized: {msg}')        
 
     # region Sensor Value Update Functions
-    def request_all_sensors(self):
-        for sensor_type in REQUEST_MSGS:
-            self.request_data(sensor_type)
+    def request_next_sensor(self):
+        # All requests together exceed the Uno's 64-byte RX buffer, dropping
+        # the trailing UIMODE request if loop() is busy. Send one per tick.
+        self.request_data(next(self._sensor_requests))
 
     def request_data(self, sensor_type: SensorType):
         # Sends a request to the Arduino to get some sensor reading
