@@ -23,6 +23,7 @@ REQUEST_MSGS = {
     SensorType.DC_ENCODER: b'REQ:DCE\n',
     SensorType.DC_RPM: b'REQ:DCR\n',
     SensorType.UI_MODE: b'REQ:UIMODE\n',
+    SensorType.STEPPER_MOVED: b'REQ:STA\n',
 }
 
 RESPONSE_HEADERS = {
@@ -34,6 +35,7 @@ RESPONSE_HEADERS = {
     'DCE': SensorType.DC_ENCODER,
     'DCR': SensorType.DC_RPM,
     'UIMODE': SensorType.UI_MODE,
+    'STA': SensorType.STEPPER_MOVED,
 }
 
 
@@ -57,6 +59,7 @@ class CommsNode(Node):
         self.dc_encoder_pub = self.create_publisher(Int32, 'dc_encoder', 10) # Signed counts, 420/rev
         self.dc_rpm_pub = self.create_publisher(Float32, 'dc_rpm', 10)
         self.ui_mode_pub = self.create_publisher(Bool, 'ui_mode', 10)
+        self.stepper_moved_pub = self.create_publisher(Float32, 'stepper_moved', 10)
 
         # Was thinking don't request from UI, just request here repeatedly
         # self.read_request_sub = self.create_subscription(
@@ -75,6 +78,7 @@ class CommsNode(Node):
             SensorType.DC_ENCODER: 0,
             SensorType.DC_RPM: 0.0,
             SensorType.UI_MODE: None,
+            SensorType.STEPPER_MOVED: 0.0,
         }
         
         try:
@@ -130,6 +134,8 @@ class CommsNode(Node):
                     self.updateDcRpmValue(msgSplit[1])
                 case SensorType.UI_MODE:
                     self.updateUIModeValue(msgSplit[1])
+                case SensorType.STEPPER_MOVED:
+                    self.updateStepperMovedValue(msgSplit[1])
         else:
             self.get_logger().warning(f'Response not recognized: {msg}')        
 
@@ -178,6 +184,10 @@ class CommsNode(Node):
             return
         self.sensor_values[SensorType.UI_MODE] = value == '1'
         self.ui_mode_pub.publish(Bool(data=self.sensor_values[SensorType.UI_MODE]))
+    
+    def updateStepperMovedValue(self, value: str):
+        self.sensor_values[SensorType.STEPPER_MOVED] = float(value)
+        self.stepper_moved_pub.publish(Float32(data=self.sensor_values[SensorType.STEPPER_MOVED]))
     # endregion Sensor Value Update Functions
 
 def main(args=None):
