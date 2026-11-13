@@ -12,6 +12,7 @@ class SensorType(Enum):
     DC_ENCODER = 5
     DC_RPM = 6
     UI_MODE = 7
+    STEPPER_MOVED = 8
 
 
 class MotorType(Enum):

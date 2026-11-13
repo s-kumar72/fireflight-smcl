@@ -232,6 +232,7 @@ class UiWidget(QWidget):
         self.motor_send_buttons = {}
         self.smoke_fusion = SmokeFusion()
         self._dc_position_deg = 0.0
+        self._stepper_requested_deg = None
         self._history_lock = Lock()
 
         # region Values
@@ -244,6 +245,7 @@ class UiWidget(QWidget):
             SensorType.DC_ENCODER: 0,
             SensorType.DC_RPM: 0.0,
             SensorType.UI_MODE: None,
+            SensorType.STEPPER_MOVED: None,
         }
 
         self.data_history = {
@@ -278,12 +280,13 @@ class UiWidget(QWidget):
             self.dc_encoder_sub = node.create_subscription(Int32, 'dc_encoder', self.dc_encoder_callback, 10)
             self.dc_rpm_sub = node.create_subscription(Float32, 'dc_rpm', self.dc_rpm_callback, 10)
             self.ui_mode_sub = node.create_subscription(Bool, 'ui_mode', self.ui_mode_callback, 10)
+            self.stepper_moved_sub = node.create_subscription(Float32, 'stepper_moved', self.stepper_moved_callback, 10)
             # Stepper and servo are technically open-loop, so no subs for these
             # endregion Publishers and Subscribers
 
             self._subscriptions = [self.pot_sub, self.thermistor_sub,
                 self.ultrasonic_sub, self.slot_sub, self.tof_sub, self.dc_encoder_sub,
-                self.dc_rpm_sub, self.ui_mode_sub]
+                self.dc_rpm_sub, self.ui_mode_sub, self.stepper_moved_sub]
 
         # region UI Setup
         self.setObjectName('FireFlightUi')
@@ -367,7 +370,15 @@ class UiWidget(QWidget):
         entry = self.motor_position_entries[motor]
         if entry.hasAcceptableInput():
             position = int(entry.text())
+            if motor == MotorType.STEPPER and self.sensor_values[SensorType.UI_MODE] is False:
+                self.motor_labels[motor].setText('Switch to UI control first')
+                return
             if self.send_motor_command(motor, position):
+                if motor == MotorType.STEPPER:
+                    self._stepper_requested_deg = position
+                    self.sensor_values[SensorType.STEPPER_MOVED] = None
+                    self.motor_labels[motor].setText(f'Requested {position}° | Moved —')
+                    return
                 self.motor_labels[motor].setText(f'POS: {position}°')
                 if motor == MotorType.DC:
                     slider = self.motor_sliders[motor]
@@ -443,6 +454,9 @@ class UiWidget(QWidget):
         self.sensor_values[SensorType.DC_RPM] = msg.data
         self._record(SensorType.DC_ENCODER, self._dc_position_deg, msg.data)
 
+    def stepper_moved_callback(self, msg: Float32):
+        self.sensor_values[SensorType.STEPPER_MOVED] = msg.data
+
     def ui_mode_callback(self, msg: Bool):
         self.sensor_values[SensorType.UI_MODE] = msg.data
 
@@ -513,7 +527,11 @@ class UiWidget(QWidget):
         pass
 
     def update_stepper_ui(self):
-        pass
+        moved = self.sensor_values[SensorType.STEPPER_MOVED]
+        if self._stepper_requested_deg is None or moved is None:
+            return
+        self.motor_labels[MotorType.STEPPER].setText(
+            f'Requested {self._stepper_requested_deg}° | Moved {moved:.3f}°')
 
     def update_dc_ui(self):
         pass

@@ -15,7 +15,8 @@
   Motor commands are ignored in sensor mode. Switching modes cancels pending
   stepper travel and stops the DC motor; the servo holds until its next target.
   Every accepted DC command zeros the encoder and starts a new relative origin.
-  Sensor requests work in BOTH modes: REQ:POT/THERM/ULTR/SLOT/TOF/DCE/DCR/UIMODE.
+  Sensor requests work in BOTH modes: REQ:POT/THERM/ULTR/SLOT/TOF/DCE/DCR/UIMODE/STA.
+  STA is the stepper angle actually moved (degrees) since the last accepted STP command.
   UIMODE is boolean: 1 = UI control, 0 = sensor control (D13 button state).
   ULT reports raw 10-bit ADC counts; the UI converts counts to meters.
   SLOT reports integer RPM, 0..4095, using a local three-blade counter.
@@ -118,6 +119,7 @@ float sonarFilteredMm = 0;
 float servoDeg = 90;
 unsigned long lastSensorMs = 0, lastServoMs = 0, lastStepUs = 0;
 long stepperPos = 0, stepperTarget = 0;
+long stepperGuiMovedSteps = 0;
 volatile long encoderCount = 0;
 long previousEncoderCount = 0;
 float actualAngleDeg = 0, actualRPM = 0;
@@ -305,6 +307,7 @@ void stepperUpdate() {
   delayMicroseconds(2);
   digitalWrite(STEP_PIN, LOW);
   stepperPos += forward ? 1 : -1;
+  if (control_model == UI_CONTROL) stepperGuiMovedSteps += forward ? 1 : -1;
 }
 
 void dcUpdate() {
@@ -363,6 +366,10 @@ void handleRequest(const char *cmd) {
   else if (strcmp(cmd, "REQ:SLOT") == 0) reply("SLT:", slotHandleRequest());
   else if (strcmp(cmd, "REQ:TOF") == 0) reply("TOF:", tofValid ? tofRawMm : -1);
   else if (strcmp(cmd, "REQ:UIMODE") == 0) reply("UIMODE:", controlMode == UI_CONTROL);
+  else if (strcmp(cmd, "REQ:STA") == 0) {
+    Serial.print("STA:");
+    Serial.println(stepperGuiMovedSteps * DEG_PER_STEP, 3);
+  }
   else if (strcmp(cmd, "REQ:DCE") == 0) {
     reply("DCE:", readEncoder());
   } else if (strcmp(cmd, "REQ:DCR") == 0) {
@@ -379,6 +386,7 @@ void handleRequest(const char *cmd) {
       // Matches stepperMoveRelDeg: relative to the current physical position.
       float degrees = cmd[4] == '-' ? -(float)value : (float)value;
       stepperTarget = stepperPos + lround(degrees / DEG_PER_STEP);
+      stepperGuiMovedSteps = 0;
     } else if (length >= 9 && strncmp(cmd, "DCM:", 4) == 0 &&
                (cmd[4] == 'P' || cmd[4] == 'V') && cmd[5] == ':' &&
                (cmd[6] == '+' || cmd[6] == '-') && cmd[7] == ':' &&
