@@ -307,7 +307,7 @@ void stepperUpdate() {
   delayMicroseconds(2);
   digitalWrite(STEP_PIN, LOW);
   stepperPos += forward ? 1 : -1;
-  if (control_model == UI_CONTROL) stepperGuiMovedSteps += forward ? 1 : -1;
+  if (controlMode == UI_CONTROL) stepperGuiMovedSteps += forward ? 1 : -1;
 }
 
 void dcUpdate() {
