@@ -276,6 +276,7 @@ class UiWidget(QWidget):
             SensorType.TOF: None,
             SensorType.DC_ENCODER: 0,
             SensorType.DC_RPM: 0.0,
+            SensorType.DES_RPM: None,
             SensorType.UI_MODE: None,
             SensorType.STEPPER_MOVED: None,
         }
@@ -311,6 +312,7 @@ class UiWidget(QWidget):
 
             self.dc_encoder_sub = node.create_subscription(Int32, 'dc_encoder', self.dc_encoder_callback, 10)
             self.dc_rpm_sub = node.create_subscription(Float32, 'dc_rpm', self.dc_rpm_callback, 10)
+            self.des_rpm_sub = node.create_subscription(Float32, 'des_rpm', self.des_rpm_callback, 10)
             self.ui_mode_sub = node.create_subscription(Bool, 'ui_mode', self.ui_mode_callback, 10)
             self.stepper_moved_sub = node.create_subscription(Float32, 'stepper_moved', self.stepper_moved_callback, 10)
             # Stepper and servo are technically open-loop, so no subs for these
@@ -318,7 +320,7 @@ class UiWidget(QWidget):
 
             self._subscriptions = [self.pot_sub, self.thermistor_sub,
                 self.ultrasonic_sub, self.slot_sub, self.tof_sub, self.dc_encoder_sub,
-                self.dc_rpm_sub, self.ui_mode_sub, self.stepper_moved_sub]
+                self.dc_rpm_sub, self.des_rpm_sub, self.ui_mode_sub, self.stepper_moved_sub]
 
         # region UI Setup
         self.setObjectName('FireFlightUi')
@@ -486,6 +488,9 @@ class UiWidget(QWidget):
         self.sensor_values[SensorType.DC_RPM] = msg.data
         self._record(SensorType.DC_ENCODER, self._dc_position_deg, msg.data)
 
+    def des_rpm_callback(self, msg: Float32):
+        self.sensor_values[SensorType.DES_RPM] = msg.data
+
     def stepper_moved_callback(self, msg: Float32):
         self.sensor_values[SensorType.STEPPER_MOVED] = msg.data
 
@@ -575,7 +580,10 @@ class UiWidget(QWidget):
             f'Requested {self._stepper_requested_deg}° | Moved {moved:.3f}°')
 
     def update_dc_ui(self):
-        pass
+        rpm = self.sensor_values[SensorType.DES_RPM]
+        if self.sensor_values[SensorType.UI_MODE] is False and rpm is not None:
+            # The refresh timer runs on Qt's thread; ROS callbacks only store data.
+            self.sensor_charts[SensorType.DC_ENCODER].set_setpoints(0, rpm)
 
     # endregion Update Functions
 

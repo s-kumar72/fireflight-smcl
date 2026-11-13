@@ -22,6 +22,7 @@ REQUEST_MSGS = {
     SensorType.TOF: b'REQ:TOF\n',
     SensorType.DC_ENCODER: b'REQ:DCE\n',
     SensorType.DC_RPM: b'REQ:DCR\n',
+    SensorType.DES_RPM: b'REQ:DES_RPM\n',
     SensorType.UI_MODE: b'REQ:UIMODE\n',
     SensorType.STEPPER_MOVED: b'REQ:STA\n',
 }
@@ -34,6 +35,7 @@ RESPONSE_HEADERS = {
     'TOF': SensorType.TOF,
     'DCE': SensorType.DC_ENCODER,
     'DCR': SensorType.DC_RPM,
+    'DES_RPM': SensorType.DES_RPM,
     'UIMODE': SensorType.UI_MODE,
     'STA': SensorType.STEPPER_MOVED,
 }
@@ -58,6 +60,7 @@ class CommsNode(Node):
         self.tof_pub = self.create_publisher(Int32, 'tof', 10) # 0~4000
         self.dc_encoder_pub = self.create_publisher(Int32, 'dc_encoder', 10) # Signed counts, 420/rev
         self.dc_rpm_pub = self.create_publisher(Float32, 'dc_rpm', 10)
+        self.des_rpm_pub = self.create_publisher(Float32, 'des_rpm', 10)
         self.ui_mode_pub = self.create_publisher(Bool, 'ui_mode', 10)
         self.stepper_moved_pub = self.create_publisher(Float32, 'stepper_moved', 10)
 
@@ -77,6 +80,7 @@ class CommsNode(Node):
             SensorType.TOF: 0,
             SensorType.DC_ENCODER: 0,
             SensorType.DC_RPM: 0.0,
+            SensorType.DES_RPM: 0.0,
             SensorType.UI_MODE: None,
             SensorType.STEPPER_MOVED: 0.0,
         }
@@ -98,6 +102,7 @@ class CommsNode(Node):
     # AND DIR IS "+" OR "-" AND FOR RPM is [0, 60] and for POSITION is [0, 32767] (degrees)
     # Each DC command resets the encoder origin; POSITION is a relative rotation.
     # DCE reports signed counts since that reset; DCR reports measured RPM.
+    # REQ:DES_RPM returns DES_RPM:<commanded RPM> in either control mode.
     # REQ:UIMODE returns UIMODE:1 for UI control, UIMODE:0 for sensor control.
 
     def motorCommandCallback(self, msg: String):
@@ -132,6 +137,8 @@ class CommsNode(Node):
                     self.updateDcEncoderValue(msgSplit[1])
                 case SensorType.DC_RPM:
                     self.updateDcRpmValue(msgSplit[1])
+                case SensorType.DES_RPM:
+                    self.updateDesRpmValue(msgSplit[1])
                 case SensorType.UI_MODE:
                     self.updateUIModeValue(msgSplit[1])
                 case SensorType.STEPPER_MOVED:
@@ -176,6 +183,10 @@ class CommsNode(Node):
     def updateDcRpmValue(self, value: str):
         self.sensor_values[SensorType.DC_RPM] = float(value)
         self.dc_rpm_pub.publish(Float32(data=self.sensor_values[SensorType.DC_RPM]))
+
+    def updateDesRpmValue(self, value: str):
+        self.sensor_values[SensorType.DES_RPM] = float(value)
+        self.des_rpm_pub.publish(Float32(data=self.sensor_values[SensorType.DES_RPM]))
 
     def updateUIModeValue(self, value: str):
         value = value.strip()

@@ -15,12 +15,13 @@
   Motor commands are ignored in sensor mode. Switching modes cancels pending
   stepper travel and stops the DC motor; the servo holds until its next target.
   Every accepted DC command zeros the encoder and starts a new relative origin.
-  Sensor requests work in BOTH modes: REQ:POT/THERM/ULTR/SLOT/TOF/DCE/DCR/UIMODE/STA.
+  Sensor requests work in BOTH modes: REQ:POT/THERM/ULTR/SLOT/TOF/DCE/DCR/DES_RPM/UIMODE/STA.
   STA is the stepper angle actually moved (degrees) since the last accepted STP command.
   UIMODE is boolean: 1 = UI control, 0 = sensor control (D13 button state).
   ULT reports raw 10-bit ADC counts; the UI converts counts to meters.
   SLOT reports integer RPM, 0..4095, using a local three-blade counter.
   DCE is signed encoder counts since the last DC command (420 per revolution).
+  DES_RPM is commanded shaft RPM (the filtered ultrasonic target in sensor mode).
   DCR is measured shaft RPM; TOF is -1
   when unavailable/invalid. Only protocol replies are written to Serial.
 
@@ -375,6 +376,9 @@ void handleRequest(const char *cmd) {
   } else if (strcmp(cmd, "REQ:DCR") == 0) {
     Serial.print("DCR:");
     Serial.println(actualRPM, 2);
+  } else if (strcmp(cmd, "REQ:DES_RPM") == 0) {
+    Serial.print("DES_RPM:");
+    Serial.println(targetRPM, 2);
   } else if (controlMode == UI_CONTROL) {
     unsigned int value;
     size_t length = strlen(cmd);
